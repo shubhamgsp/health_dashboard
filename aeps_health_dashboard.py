@@ -940,7 +940,7 @@ def get_distributor_churn_data():
             st.warning("⚠️ Distributor Churn: No BigQuery client available")
             return None
             
-        distributor_churn_query = """
+        distributor_churn_query = f"""
         DECLARE s_date DATE DEFAULT DATE '2023-08-01';
 
         WITH month_list AS (
@@ -5192,7 +5192,7 @@ def get_dummy_metrics_for_remaining():
         # Add Active Bugs - Real data from Google Sheets (with CSV fallback)
         try:
             # Try Google Sheets first for real-time updates
-            bugs_df = get_google_sheets_data('Bugs', None)
+            bugs_df = get_bugs_data_from_sheets()
             
             # Fallback to CSV if Google Sheets not available
             if bugs_df is None or bugs_df.empty:
@@ -5906,6 +5906,35 @@ def get_google_sheets_data(sheet_name, fallback_function=None):
             return fallback_function()
         else:
             return pd.DataFrame()
+
+def get_bugs_data_from_sheets():
+    """
+    Fetch bugs data from dedicated bugs Google Sheet
+    
+    Returns:
+        pandas.DataFrame: Bugs data or None if unavailable
+    """
+    try:
+        import pygsheets
+        
+        # Get Google Sheets client (works with both Streamlit Cloud secrets and local file)
+        gc = get_google_sheets_client()
+        if gc is None:
+            return None
+        
+        # Use the dedicated bugs sheet URL
+        sh = gc.open_by_url('https://docs.google.com/spreadsheets/d/1DLU87T3DW9ruoR_U_jVCTV8hvuVCRSw8VMWLaN1PUBU/edit?gid=0#gid=0')
+        worksheet = sh.worksheet_by_title('Sheet1')
+        data = worksheet.get_as_df()
+        
+        if data.empty:
+            return None
+        
+        return data
+        
+    except Exception as e:
+        # Silent failure - will fallback to CSV
+        return None
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_bugs_data_from_csv():
