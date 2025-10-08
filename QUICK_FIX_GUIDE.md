@@ -65,10 +65,27 @@ universe_domain = "googleapis.com"
 1. Click **Save** (bottom right)
 2. Your app will automatically restart (takes ~30 seconds)
 
-### Step 4: Verify It Works
+### Step 4: Share Google Sheets with Service Account
+**IMPORTANT:** For Google Sheets integration to work, you need to share your sheets with the service account:
+
+1. Open your Google Sheets:
+   - Anomaly Dashboard: `https://docs.google.com/spreadsheets/d/1HaW-pC5niZNm0_ii4zoXG-xR781dmDmbPjQf6W_b7Y8`
+   - Login Data: `https://docs.google.com/spreadsheets/d/1XyTNR14JlkM_7uHEeoQa68mLgeiAZTaCq9vR-VCff4o`
+
+2. Click **Share** button (top right)
+
+3. Add this email address with **Viewer** access:
+   ```
+   mrunalinee-patole@spicemoney-dwh.iam.gserviceaccount.com
+   ```
+
+4. Click **Send**
+
+### Step 5: Verify It Works
 1. Visit: https://healthdashboardgit-kc5zbc5mqhc6r8i3yasf7y.streamlit.app/
 2. Look for: **"✅ Connected to BigQuery (Streamlit Cloud): spicemoney-dwh"**
-3. You should now see real data instead of dummy data!
+3. Google Sheets data should now load without errors!
+4. You should see real data instead of dummy/sample data
 
 ---
 
@@ -101,11 +118,24 @@ universe_domain = "googleapis.com"
 
 ## 🐛 Troubleshooting
 
-### Still seeing the error?
+### Still seeing BigQuery credential errors?
 1. Make sure you **saved** the secrets in Streamlit Cloud
 2. Wait 30 seconds for the app to restart
 3. Hard refresh your browser (Ctrl+F5 or Cmd+Shift+R)
 4. Check that the private_key is wrapped in triple quotes `"""`
+
+### Seeing Google Sheets errors?
+**Error: "No such file or directory: 'credentials.json'"**
+
+✅ **This is now FIXED!** Just push the latest code changes:
+1. The code has been updated to use Streamlit secrets
+2. Your app will auto-deploy from GitHub (takes ~1-2 minutes)
+3. Make sure to **share your Google Sheets** with the service account email (see Step 4 above)
+
+**Error: "Permission denied" or "Access failed"**
+- Verify that you've shared the Google Sheets with: `mrunalinee-patole@spicemoney-dwh.iam.gserviceaccount.com`
+- Check that you gave **Viewer** or **Editor** access
+- Wait a few seconds after sharing, then refresh your app
 
 ### Need to update secrets?
 1. Go back to Streamlit Cloud → Settings → Secrets
