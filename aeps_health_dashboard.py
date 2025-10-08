@@ -6101,14 +6101,16 @@ def get_product_metrics_data():
         # Get Google Sheets client
         gc = get_google_sheets_client()
         if gc is None:
+            st.warning("⚠️ Google Sheets client not available")
             return None
         
-        # Open the product metrics sheet
-        sh = gc.open_by_url('https://docs.google.com/spreadsheets/d/1LMDeoOLzfMaLfuVown4If6ffI1agZlEzjTHzFgBuqRw/edit?gid=1626703856#gid=1626703856')
-        worksheet = sh.worksheet_by_title('Sheet1')  # Adjust if different
+        # Open the product metrics sheet (updated to new sheet)
+        sh = gc.open_by_url('https://docs.google.com/spreadsheets/d/1DLU87T3DW9ruoR_U_jVCTV8hvuVCRSw8VMWLaN1PUBU/edit?gid=272453504#gid=272453504')
+        worksheet = sh.worksheet_by_title('Sheet2')  # Updated to new sheet and correct worksheet name
         df = worksheet.get_as_df()
         
         if df.empty:
+            st.warning("⚠️ No data found in Google Sheets")
             return None
         
         # Clean column names
@@ -6118,10 +6120,11 @@ def get_product_metrics_data():
         if 'Metric' in df.columns:
             df = df.set_index('Metric')
         
+        st.success(f"✅ Loaded {len(df)} metrics from Google Sheets")
         return df
         
     except Exception as e:
-        # Silent failure - will use sample data
+        st.error(f"❌ Error loading Google Sheets: {str(e)}")
         return None
 
 def create_sample_product_metrics():
@@ -6327,15 +6330,23 @@ def show_product_metrics_dashboard():
         st.session_state.current_view = "main"
         st.rerun()
     
+    # Debug info
+    st.info("🔍 Debug: Product Metrics Dashboard loaded successfully!")
+    
     # Load product metrics data
     with st.spinner("🔄 Loading product metrics data..."):
-        metrics_df = get_product_metrics_data()
-        
-        if metrics_df is None:
+        try:
+            metrics_df = get_product_metrics_data()
+            
+            if metrics_df is None:
+                st.warning("⚠️ Google Sheets not available. Using sample data.")
+                metrics_df = create_sample_product_metrics()
+            else:
+                st.success("✅ Data loaded from Google Sheets")
+        except Exception as e:
+            st.error(f"❌ Error loading data: {str(e)}")
+            st.info("Using sample data as fallback...")
             metrics_df = create_sample_product_metrics()
-            st.warning("⚠️ Using sample data. Connect to Google Sheets for real-time data.")
-        else:
-            st.success("✅ Data loaded from Google Sheets")
     
     if metrics_df.empty:
         st.error("❌ No product metrics data available.")
@@ -12895,7 +12906,7 @@ def main():
 
         with col_ops:
             st.markdown('<div class="section-header">⚙️ Operations</div>', unsafe_allow_html=True)
-            for disp, key in [("Anomalies", "System Anomalies"), ("Bugs", "Active Bugs"), ("RCAs", "Active RCAs")]:
+            for disp, key in [("Anomalies", "System Anomalies"), ("Bugs", "Active Bugs"), ("RCAs", "Active RCAs"), ("Product Trends", "Product Metrics & Trends")]:
                 render_light_tile(disp, key, health_metrics.get(key, {'value': 0, 'status': 'red', 'trend': 'stable', 'change': 0, 'unit': '%'}))
 
         return
