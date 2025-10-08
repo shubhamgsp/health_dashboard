@@ -6321,6 +6321,188 @@ def show_bugs_dashboard():
             mime="text/csv"
         )
 
+def show_winback_dashboard():
+    """Display dedicated winback dashboard"""
+    st.markdown("# 🔄 Winback Analytics Dashboard")
+    
+    # Back button
+    if st.button("← Back to Main Dashboard", key="back_to_main_winback"):
+        st.session_state.current_view = "main"
+        st.rerun()
+    
+    # Load product metrics data
+    with st.spinner("🔄 Loading winback data..."):
+        try:
+            metrics_df = get_product_metrics_data()
+            
+            if metrics_df is None:
+                st.warning("⚠️ Google Sheets not available. Using sample data.")
+                metrics_df = create_sample_product_metrics()
+            else:
+                st.success("✅ Data loaded from Google Sheets")
+        except Exception as e:
+            st.error(f"❌ Error loading data: {str(e)}")
+            st.info("Using sample data as fallback...")
+            metrics_df = create_sample_product_metrics()
+    
+    if metrics_df.empty:
+        st.error("❌ No winback data available.")
+        return
+    
+    # Get list of month columns (exclude non-date columns)
+    month_columns = [col for col in metrics_df.columns if any(year in str(col) for year in ['2023', '2024', '2025'])]
+    
+    # Key metrics summary for latest month
+    if month_columns:
+        latest_month = month_columns[-1]
+        st.markdown(f"### 📈 Latest Month: {latest_month}")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            if 'SP winback' in metrics_df.index:
+                winback = str(metrics_df.loc['SP winback', latest_month])
+                st.metric("SP Winback", winback, help="SP Winback Count")
+        
+        with col2:
+            if 'SP Status Retained' in metrics_df.index:
+                retained = str(metrics_df.loc['SP Status Retained', latest_month])
+                st.metric("SP Retained", retained, help="SP Status Retained Count")
+        
+        with col3:
+            if 'SP status retention ratio' in metrics_df.index:
+                retention_ratio = str(metrics_df.loc['SP status retention ratio', latest_month])
+                st.metric("Retention Ratio", retention_ratio, help="SP Status Retention Ratio")
+        
+        with col4:
+            if 'SP winback' in metrics_df.index and len(month_columns) > 1:
+                current_winback = float(str(metrics_df.loc['SP winback', latest_month]).replace(',', ''))
+                previous_winback = float(str(metrics_df.loc['SP winback', month_columns[-2]]).replace(',', ''))
+                change = ((current_winback - previous_winback) / previous_winback * 100) if previous_winback > 0 else 0
+                st.metric("Month-over-Month", f"{change:+.1f}%", help="Winback Change from Previous Month")
+    
+    # Winback Trends Section
+    st.markdown("### 🔄 SP Winback Long-Term Trend")
+    
+    if 'SP winback' in metrics_df.index and month_columns:
+        # Prepare winback data
+        winback_data = metrics_df.loc['SP winback', month_columns]
+        
+        # Convert to numeric (handle commas)
+        winback_values = []
+        for val in winback_data:
+            try:
+                clean_val = str(val).replace(',', '')
+                winback_values.append(float(clean_val))
+            except:
+                winback_values.append(0)
+        
+        # Create DataFrame for plotting
+        trend_df = pd.DataFrame({
+            'Month': month_columns,
+            'SP Winback': winback_values
+        })
+        
+        # Line chart
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=trend_df['Month'],
+            y=trend_df['SP Winback'],
+            mode='lines+markers',
+            name='SP Winback',
+            line=dict(color='#00CC96', width=3),
+            marker=dict(size=8),
+            fill='tozeroy',
+            fillcolor='rgba(0, 204, 150, 0.1)'
+        ))
+        
+        fig.update_layout(
+            title="SP Winback Trend (Long-Term)",
+            xaxis_title="Month",
+            yaxis_title="Winback Count",
+            height=400,
+            hovermode='x unified',
+            showlegend=False
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Stats
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Average Winback", f"{int(np.mean(winback_values)):,}")
+        with col2:
+            st.metric("Max Winback", f"{int(np.max(winback_values)):,}")
+        with col3:
+            st.metric("Min Winback", f"{int(np.min(winback_values)):,}")
+        with col4:
+            recent_change = ((winback_values[-1] - winback_values[-2]) / winback_values[-2] * 100) if len(winback_values) > 1 else 0
+            st.metric("Month-over-Month", f"{recent_change:+.1f}%")
+    
+    # Additional winback metrics
+    st.markdown("#### 📊 Related Metrics")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if 'SP winback' in metrics_df.index and 'SP Status Retained' in metrics_df.index:
+            st.markdown("**Winback vs Retention**")
+            
+            winback_vals = []
+            retention_vals = []
+            for month in month_columns[-6:]:  # Last 6 months
+                try:
+                    winback_vals.append(float(str(metrics_df.loc['SP winback', month]).replace(',', '')))
+                    retention_vals.append(float(str(metrics_df.loc['SP Status Retained', month]).replace(',', '')))
+                except:
+                    pass
+            
+            if winback_vals and retention_vals:
+                comparison_df = pd.DataFrame({
+                    'Month': month_columns[-6:],
+                    'Winback': winback_vals,
+                    'Retained': retention_vals
+                })
+                
+                fig = go.Figure()
+                fig.add_trace(go.Bar(name='Winback', x=comparison_df['Month'], y=comparison_df['Winback'], marker_color='#00CC96'))
+                fig.add_trace(go.Bar(name='Retained', x=comparison_df['Month'], y=comparison_df['Retained'], marker_color='#636EFA'))
+                fig.update_layout(barmode='group', height=300)
+                st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        if 'SP status retention ratio' in metrics_df.index:
+            st.markdown("**Retention Ratio Trend**")
+            retention_ratio_vals = []
+            for month in month_columns:
+                try:
+                    ratio_val = str(metrics_df.loc['SP status retention ratio', month]).replace('%', '')
+                    retention_ratio_vals.append(float(ratio_val))
+                except:
+                    retention_ratio_vals.append(0)
+            
+            if retention_ratio_vals:
+                ratio_df = pd.DataFrame({
+                    'Month': month_columns,
+                    'Retention Ratio': retention_ratio_vals
+                })
+                
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=ratio_df['Month'],
+                    y=ratio_df['Retention Ratio'],
+                    mode='lines+markers',
+                    name='Retention Ratio',
+                    line=dict(color='#FF6B6B', width=3),
+                    marker=dict(size=8)
+                ))
+                fig.update_layout(
+                    title="SP Status Retention Ratio Trend",
+                    xaxis_title="Month",
+                    yaxis_title="Retention Ratio (%)",
+                    height=300
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
 def show_product_metrics_dashboard():
     """Display comprehensive product-wise metrics and long-term trends"""
     st.markdown("# 📊 Product Metrics & Long-Term Trends")
@@ -6387,16 +6569,15 @@ def show_product_metrics_dashboard():
                 vip_smas = str(metrics_df.loc['VIP plan active SMAs', latest_month])
                 st.metric("VIP SMAs", vip_smas, help="Active VIP plan SMAs")
     
-    # Tabs for different views
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "📈 Winback Trends", 
+    # Tabs for different views (removed Winback Trends - moved to dedicated Winback tile)
+    tab1, tab2, tab3 = st.tabs([
         "🎯 Market Performance",
         "💰 GTV & Transactions",
         "📊 All Metrics"
     ])
     
     with tab1:
-        st.markdown("### 🔄 SP Winback Long-Term Trend")
+        st.markdown("### 🎯 Market Performance Analysis")
         
         if 'SP winback' in metrics_df.index and month_columns:
             # Prepare winback data
@@ -12876,7 +13057,7 @@ def main():
                 elif actual_name == 'Bank Error Analysis':
                     st.session_state.current_view = "dashboard_Bank_Error_Analysis"
                 elif actual_name == 'Winback Conversion':
-                    st.info(f"📊 {actual_name} detailed analytics coming soon.")
+                    st.session_state.current_view = "winback_dashboard"
                     st.rerun()
                     return
                 elif actual_name == 'Sales Iteration':
@@ -12901,7 +13082,7 @@ def main():
 
         with col_partner:
             st.markdown('<div class="section-header">🤝 Partner</div>', unsafe_allow_html=True)
-            for disp, key in [("New Users", "New AEPS Users"), ("Churn", "Churn Rate"), ("Stable Users", "Stable Users"), ("Winback Conv", "Winback Conversion"), ("Sales Iteration", "Sales Iteration"), ("Dist Lead Churn", "Distributor Lead Churn")]:
+            for disp, key in [("New Users", "New AEPS Users"), ("Churn", "Churn Rate"), ("Stable Users", "Stable Users"), ("Winback", "Winback Conversion"), ("Sales Iteration", "Sales Iteration"), ("Dist Lead Churn", "Distributor Lead Churn")]:
                 render_light_tile(disp, key, health_metrics.get(key, {'value': 0, 'status': 'red', 'trend': 'stable', 'change': 0, 'unit': '%'}))
 
         with col_ops:
@@ -13108,6 +13289,10 @@ def main():
     # Product Metrics dashboard
     elif st.session_state.current_view == "product_metrics_dashboard":
         show_product_metrics_dashboard()
+    
+    # Winback dashboard
+    elif st.session_state.current_view == "winback_dashboard":
+        show_winback_dashboard()
     
     # Anomalies detailed view
     elif st.session_state.current_view == "detail_System Anomalies":
