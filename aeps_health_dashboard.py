@@ -1532,7 +1532,7 @@ def get_stable_users_analytics():
         """
         
         # Stable Tail agents query
-        stable_tail_query = """
+        stable_tail_query = f"""
         -- Step 1: Generate last 3 reference months dynamically (current + 2 previous)
         WITH ref_months AS (
           SELECT DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL n MONTH), MONTH) AS ref_month
