@@ -1,0 +1,49 @@
+# AEPS Health Dashboard Configuration
+
+[streamlit]
+page_title = "AEPS Health Monitor Enhanced"
+page_icon = "🏥"
+layout = "wide"
+sidebar_state = "expanded"
+
+[security]
+dashboard_password = "your-secure-password"
+
+[bigquery]
+project_id = "spicemoney-dwh"
+credentials_file = "spicemoney-dwh.json"
+
+[bigquery.datasets]
+prod = "prod_dwh"
+analytics = "analytics_dwh"
+fraud = "fraud_risk_data"
+ds_striim = "ds_striim"
+
+[bigquery.tables.prod_dwh]
+aeps_trans_res = "aeps_trans_res"
+aeps_trans_req = "aeps_trans_req"
+client_details = "client_details"
+client_master = "client_master"
+h2h_transactions = "h2h_transactions"
+aeps_c2b_h2h_req = "aeps_c2b_h2h_req"
+
+[bigquery.tables.analytics_dwh]
+csp_monthly_timeline_with_tu = "csp_monthly_timeline_with_tu"
+csp_monthly_timeline = "csp_monthly_timeline"
+v_client_pincode = "v_client_pincode"
+distributorwise_agent_churn = "distributorwise_agent_churn_data_master_live"
+ground_truth_frauds = "Ground_Truth_Frauds_sanitised_check_blank"
+rfm_web_v2_hourly = "rfm_web_v2_hourly"
+
+[bigquery.tables.fraud_risk_data]
+fm_log_risk_score = "fm_log_risk_score"
+
+[bigquery.tables.ds_striim]
+aepsr_transaction_res = "T_AEPSR_TRANSACTION_RES"
+aepsr_transaction_req = "T_AEPSR_TRANSACTION_REQ"
+aepsr_bio_auth_logging = "T_AEPSR_BIO_AUTH_LOGGING_P"
+
+[google]
+# Optional: Uncomment if using Google Sheets integration
+# sheets_scopes = "https://www.googleapis.com/auth/spreadsheets"
+

@@ -641,25 +641,64 @@ def show_bank_error_dashboard():
 # BigQuery connection function
 @st.cache_resource
 def get_bigquery_client():
-    """Initialize BigQuery client"""
+    """Initialize BigQuery client with support for both Streamlit Cloud secrets and local file"""
     try:
+        # Define scopes for BigQuery and Google Sheets
+        scope = [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/cloud-platform",
+            "https://www.googleapis.com/auth/bigquery"
+        ]
+        
+        # Try loading from Streamlit secrets first (for Streamlit Cloud deployment)
+        try:
+            if "gcp_service_account" in st.secrets:
+                credentials = service_account.Credentials.from_service_account_info(
+                    st.secrets["gcp_service_account"],
+                    scopes=scope
+                )
+                project_id = st.secrets["gcp_service_account"]["project_id"]
+                
+                client = bigquery.Client(
+                    credentials=credentials,
+                    project=project_id
+                )
+                
+                st.success(f"✅ Connected to BigQuery (Streamlit Cloud): {project_id}")
+                return client
+        except Exception as e:
+            # If secrets not found, continue to file-based loading
+            pass
+        
+        # Fallback to file-based credentials (for local development)
         credentials_file = os.getenv("BIGQUERY_CREDENTIALS_FILE", "spicemoney-dwh.json")
         project_id = os.getenv("BIGQUERY_PROJECT_ID", "spicemoney-dwh")
         
-        if os.path.exists(credentials_file):
-            scope = os.getenv("GOOGLE_SHEETS_SCOPES", 
-                "https://spreadsheets.google.com/feeds,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/bigquery").split(',')
+        # Resolve credentials file path relative to script location
+        if not os.path.isabs(credentials_file):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            credentials_file_path = os.path.join(script_dir, credentials_file)
             
+            # If not found relative to script, try current working directory
+            if not os.path.exists(credentials_file_path):
+                credentials_file_path = credentials_file
+        else:
+            credentials_file_path = credentials_file
+        
+        if os.path.exists(credentials_file_path):
             credentials = service_account.Credentials.from_service_account_file(
-                credentials_file, 
+                credentials_file_path,
                 scopes=scope
             )
             
             client = bigquery.Client(
-                credentials=credentials, 
+                credentials=credentials,
                 project=project_id
             )
             
+            st.success(f"✅ Connected to BigQuery (Local): {project_id}")
             return client
         else:
             st.warning("🔄 BigQuery credentials not found. Using enhanced dummy data.")
