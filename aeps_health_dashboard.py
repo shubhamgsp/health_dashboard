@@ -5192,22 +5192,22 @@ def get_dummy_metrics_for_remaining():
         # Add Active Bugs - Real data from Google Sheets (with CSV fallback)
         try:
             # Try Google Sheets first for real-time updates
-            bugs_df = get_bugs_data_from_sheets()
+            bugs_df = get_bugs_dataframe_from_sheets()
             
             # Fallback to CSV if Google Sheets not available
-            if bugs_df is None or bugs_df.empty:
+            if bugs_df is None or (hasattr(bugs_df, 'empty') and bugs_df.empty):
                 csv_path = "bugs_data.csv"
                 if os.path.exists(csv_path):
                     bugs_df = pd.read_csv(csv_path)
             
-            if bugs_df is not None and not bugs_df.empty:
+            if bugs_df is not None and hasattr(bugs_df, 'empty') and not bugs_df.empty:
                 # Normalize column names (handle both lowercase and uppercase)
                 bugs_df.columns = bugs_df.columns.str.strip().str.lower()
                 
                 # Count active bugs (status is 'open', 'pending', or 'wip')
                 active_statuses = ['open', 'pending', 'wip']
                 if 'status' in bugs_df.columns:
-                    active_bugs = len(bugs_df[bugs_df['status'].str.lower().isin(active_statuses)])
+                    active_bugs = len(bugs_df[bugs_df['status'].str.strip().str.lower().isin(active_statuses)])
                 else:
                     active_bugs = 0
                 
@@ -5907,9 +5907,9 @@ def get_google_sheets_data(sheet_name, fallback_function=None):
         else:
             return pd.DataFrame()
 
-def get_bugs_data_from_sheets():
+def get_bugs_dataframe_from_sheets():
     """
-    Fetch bugs data from dedicated bugs Google Sheet
+    Fetch bugs data from dedicated bugs Google Sheet as DataFrame
     
     Returns:
         pandas.DataFrame: Bugs data or None if unavailable
@@ -5956,10 +5956,17 @@ def get_bugs_data_from_csv():
             st.warning("⚠️ No bugs data found in CSV file. Using sample data.")
             return get_sample_bugs_data()
         
+        # Normalize column names and clean data
+        df.columns = df.columns.str.strip()
+        
+        # Clean status column - remove whitespace and handle case sensitivity
+        if 'status' in df.columns:
+            df['status'] = df['status'].str.strip()
+        
         # Process the bugs data
         total_bugs = len(df)
         
-        # Count bugs by status
+        # Count bugs by status (case-sensitive matching as per CSV)
         status_counts = df['status'].value_counts()
         open_bugs = status_counts.get('open', 0)
         fixed_bugs = status_counts.get('Fixed', 0)
@@ -5997,31 +6004,32 @@ def get_bugs_data_from_sheets():
     Returns bugs metrics for the dashboard
     """
     try:
-        # Check if pygsheets is available
-        if pygsheets is None:
-            st.warning("⚠️ pygsheets library not installed. Using sample bugs data.")
-            return get_sample_bugs_data()
-        
-        # Check if credentials file exists
-        credentials_path = "credentials.json"
-        if not os.path.exists(credentials_path):
-            st.warning("⚠️ Google Sheets credentials file 'credentials.json' not found. Using sample bugs data.")
-            return get_sample_bugs_data()
+        # Get Google Sheets client (works with both Streamlit Cloud secrets and local file)
+        gc = get_google_sheets_client()
+        if gc is None:
+            # Silent fallback - will try CSV next
+            return None
         
         # Use pygsheets to access the bugs spreadsheet
-        gc = pygsheets.authorize(service_file=credentials_path)
         sh = gc.open_by_url('https://docs.google.com/spreadsheets/d/1DLU87T3DW9ruoR_U_jVCTV8hvuVCRSw8VMWLaN1PUBU/edit?gid=0#gid=0')
         worksheet = sh.worksheet_by_title('Sheet1')
         df = worksheet.get_as_df()
         
         if df.empty:
-            st.warning("⚠️ No bugs data found in Google Sheets. Using sample data.")
-            return get_sample_bugs_data()
+            # Silent return - will fallback to CSV
+            return None
+        
+        # Normalize column names and clean data
+        df.columns = df.columns.str.strip()
+        
+        # Clean status column - remove whitespace
+        if 'status' in df.columns:
+            df['status'] = df['status'].str.strip()
         
         # Process the bugs data
         total_bugs = len(df)
         
-        # Count bugs by status
+        # Count bugs by status (case-sensitive matching as per CSV)
         status_counts = df['status'].value_counts()
         open_bugs = status_counts.get('open', 0)
         fixed_bugs = status_counts.get('Fixed', 0)
@@ -6051,13 +6059,8 @@ def get_bugs_data_from_sheets():
         return bugs_metrics
         
     except Exception as e:
-        st.error(f"❌ Error fetching bugs data from Google Sheets: {str(e)}")
-        st.info("💡 Troubleshooting tips:")
-        st.info("1. Ensure 'credentials.json' file exists")
-        st.info("2. Check if the Google Sheet is shared with the service account")
-        st.info("3. Verify the worksheet name is 'Sheet1'")
-        st.info("4. Install required packages: pip install pygsheets")
-        return get_sample_bugs_data()
+        # Silent failure - will fallback to CSV
+        return None
 
 def get_sample_bugs_data():
     """Generate sample bugs data when Google Sheets is not available"""
@@ -6093,12 +6096,16 @@ def show_bugs_dashboard():
         st.session_state.current_view = "main"
         st.rerun()
     
-    # Load bugs data
+    # Load bugs data - Try Google Sheets first, then CSV
     with st.spinner("🔄 Loading bugs data..."):
-        bugs_data = get_bugs_data_from_csv()
+        bugs_data = get_bugs_data_from_sheets()
+        
+        # Fallback to CSV if Google Sheets not available
+        if bugs_data is None:
+            bugs_data = get_bugs_data_from_csv()
     
     if not bugs_data or bugs_data.get('raw_data').empty:
-        st.error("❌ No bugs data available. Please ensure bugs_data.csv exists.")
+        st.error("❌ No bugs data available. Please ensure bugs_data.csv exists or configure Google Sheets.")
         return
     
     # Key metrics row
