@@ -713,6 +713,65 @@ def get_table_ref(dataset, table):
     project_id = os.getenv("BIGQUERY_PROJECT_ID", "spicemoney-dwh")
     return f"`{project_id}.{dataset}.{table}`"
 
+def get_google_sheets_client():
+    """
+    Initialize Google Sheets client with support for both Streamlit Cloud secrets and local file
+    Returns pygsheets client or None if not available
+    """
+    try:
+        if pygsheets is None:
+            return None
+        
+        # Try loading from Streamlit secrets first (for Streamlit Cloud deployment)
+        try:
+            if "gcp_service_account" in st.secrets:
+                # pygsheets can use service account info directly
+                import json
+                import tempfile
+                
+                # Create a temporary file with the credentials
+                # This is needed because pygsheets.authorize() expects a file path
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_file:
+                    json.dump(dict(st.secrets["gcp_service_account"]), temp_file)
+                    temp_path = temp_file.name
+                
+                gc = pygsheets.authorize(service_file=temp_path)
+                
+                # Clean up temp file
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+                
+                return gc
+        except Exception as e:
+            # If secrets not found, continue to file-based loading
+            pass
+        
+        # Fallback to file-based credentials (for local development)
+        credentials_file = "credentials.json"
+        
+        # Resolve credentials file path relative to script location
+        if not os.path.isabs(credentials_file):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            credentials_file_path = os.path.join(script_dir, credentials_file)
+            
+            # If not found relative to script, try current working directory
+            if not os.path.exists(credentials_file_path):
+                credentials_file_path = credentials_file
+        else:
+            credentials_file_path = credentials_file
+        
+        if os.path.exists(credentials_file_path):
+            gc = pygsheets.authorize(service_file=credentials_file_path)
+            return gc
+        else:
+            return None
+            
+    except Exception as e:
+        st.error(f"❌ Error initializing Google Sheets client: {str(e)}")
+        return None
+
 def get_bank_initials(bank_name):
     """Get bank initials for better chart readability"""
     if not bank_name:
@@ -1561,14 +1620,13 @@ def get_anomaly_data_from_sheets():
             st.info("💡 Install with: pip install pygsheets")
             return get_sample_anomaly_data()
         
-        # Check if credentials file exists
-        credentials_path = "credentials.json"
-        if not os.path.exists(credentials_path):
-            st.warning("⚠️ Google Sheets credentials file 'credentials.json' not found. Using sample data.")
+        # Get Google Sheets client (works with both Streamlit Cloud secrets and local file)
+        gc = get_google_sheets_client()
+        if gc is None:
+            st.warning("⚠️ Google Sheets credentials not found. Using sample data.")
             return get_sample_anomaly_data()
         
         # Use pygsheets to access the spreadsheet (matching your working code)
-        gc = pygsheets.authorize(service_file=credentials_path)
         sh = gc.open_by_url('https://docs.google.com/spreadsheets/d/1HaW-pC5niZNm0_ii4zoXG-xR781dmDmbPjQf6W_b7Y8/edit?gid=1999363720#gid=1999363720')
         worksheet = sh.worksheet_by_title('Dashboard')
         df = worksheet.get_as_df()
@@ -1610,9 +1668,9 @@ def get_anomaly_data_from_sheets():
     except Exception as e:
         st.error(f"❌ Error fetching anomaly data from Google Sheets: {str(e)}")
         st.info("💡 Troubleshooting tips:")
-        st.info("1. Ensure 'credentials.json' file exists")
-        st.info("2. Check if the Google Sheet is shared with the service account")
-        st.info("3. Verify the worksheet name is 'Dashboard'")
+        st.info("1. Check if the Google Sheet is shared with the service account email")
+        st.info("2. Verify the worksheet name is 'Dashboard'")
+        st.info("3. Ensure credentials are properly configured in Streamlit secrets")
         st.info("4. Install required packages: pip install pygsheets")
         return get_sample_anomaly_data()
 
@@ -5535,8 +5593,15 @@ def get_google_sheets_data(sheet_name, fallback_function=None):
     try:
         import pygsheets
         
-        # Your exact approach
-        gc = pygsheets.authorize(service_file='credentials.json')
+        # Get Google Sheets client (works with both Streamlit Cloud secrets and local file)
+        gc = get_google_sheets_client()
+        if gc is None:
+            st.warning(f"⚠️ Google Sheets credentials not available for '{sheet_name}'")
+            if fallback_function:
+                return fallback_function()
+            else:
+                return pd.DataFrame()
+        
         sh = gc.open_by_url('https://docs.google.com/spreadsheets/d/1XyTNR14JlkM_7uHEeoQa68mLgeiAZTaCq9vR-VCff4o/edit?gid=1128769976#gid=1128769976')
         worksheet = sh.worksheet_by_title(sheet_name)
         data = worksheet.get_as_df()
