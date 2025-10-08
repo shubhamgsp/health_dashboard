@@ -5234,7 +5234,8 @@ def get_dummy_metrics_for_remaining():
         # Other operations metrics (keeping as fallback)
         operations.update({
             'Active RCAs': {'value': 1, 'status': 'green', 'trend': 'stable', 'change': 0, 'unit': ''},
-            'Platform Uptime': {'value': 99.7, 'status': 'green', 'trend': 'stable', 'change': 0.1, 'unit': '%'}
+            'Platform Uptime': {'value': 99.7, 'status': 'green', 'trend': 'stable', 'change': 0.1, 'unit': '%'},
+            'Product Metrics & Trends': {'value': '📊', 'status': 'blue', 'trend': 'stable', 'change': 0, 'unit': '', 'description': 'Long-term product performance & winback trends'}
         })
         
     except Exception as e:
@@ -5243,7 +5244,8 @@ def get_dummy_metrics_for_remaining():
             'System Anomalies': {'value': 0, 'status': 'green', 'trend': 'stable', 'change': 0},
             'Active Bugs': {'value': 2, 'status': 'green', 'trend': 'down', 'change': -1, 'unit': ''},
             'Active RCAs': {'value': 1, 'status': 'green', 'trend': 'stable', 'change': 0, 'unit': ''},
-            'Platform Uptime': {'value': 99.7, 'status': 'green', 'trend': 'stable', 'change': 0.1, 'unit': '%'}
+            'Platform Uptime': {'value': 99.7, 'status': 'green', 'trend': 'stable', 'change': 0.1, 'unit': '%'},
+            'Product Metrics & Trends': {'value': '📊', 'status': 'blue', 'trend': 'stable', 'change': 0, 'unit': '', 'description': 'Long-term product performance & winback trends'}
         }
     
     # Combine all metrics (now includes real data!)
@@ -6087,6 +6089,63 @@ def get_sample_bugs_data():
         'raw_data': pd.DataFrame()
     }
 
+# ==================== PRODUCT METRICS & TRENDS ====================
+
+@st.cache_data(ttl=600)  # Cache for 10 minutes
+def get_product_metrics_data():
+    """
+    Fetch product-wise long-term metrics from Google Sheets
+    Returns historical trend data for various AePS metrics
+    """
+    try:
+        # Get Google Sheets client
+        gc = get_google_sheets_client()
+        if gc is None:
+            return None
+        
+        # Open the product metrics sheet
+        sh = gc.open_by_url('https://docs.google.com/spreadsheets/d/1LMDeoOLzfMaLfuVown4If6ffI1agZlEzjTHzFgBuqRw/edit?gid=1626703856#gid=1626703856')
+        worksheet = sh.worksheet_by_title('Sheet1')  # Adjust if different
+        df = worksheet.get_as_df()
+        
+        if df.empty:
+            return None
+        
+        # Clean column names
+        df.columns = df.columns.str.strip()
+        
+        # Set Metric column as index for easier access
+        if 'Metric' in df.columns:
+            df = df.set_index('Metric')
+        
+        return df
+        
+    except Exception as e:
+        # Silent failure - will use sample data
+        return None
+
+def create_sample_product_metrics():
+    """Generate sample product metrics data"""
+    months = ['Jul 2023', 'Aug 2023', 'Sep 2023', 'Oct 2023', 'Nov 2023', 'Dec 2023']
+    data = {
+        'Metric': [
+            'AePS market share',
+            'AePS CW gtv (Cr)',
+            'SP winback',
+            'CW transaction success rate',
+            'VIP plan active SMAs'
+        ],
+        'Jul 2023': ['17.33%', '5,015.67', '12112', '65.50%', '622'],
+        'Aug 2023': ['17.41%', '4,705.17', '9125', '65.66%', '762'],
+        'Sep 2023': ['16.62%', '4,234.88', '7236', '66.68%', '867'],
+        'Oct 2023': ['16.99%', '4,310.70', '9843', '64.09%', '986'],
+        'Nov 2023': ['17.44%', '5,051.58', '13761', '57.44%', '1,168'],
+        'Dec 2023': ['17.49%', '4,300.53', '7046', '58.39%', '1,529']
+    }
+    df = pd.DataFrame(data)
+    df = df.set_index('Metric')
+    return df
+
 def show_bugs_dashboard():
     """Display comprehensive bugs tracking dashboard"""
     st.markdown("# 🐛 Bugs Tracking Dashboard")
@@ -6258,6 +6317,377 @@ def show_bugs_dashboard():
             file_name=f"bugs_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv"
         )
+
+def show_product_metrics_dashboard():
+    """Display comprehensive product-wise metrics and long-term trends"""
+    st.markdown("# 📊 Product Metrics & Long-Term Trends")
+    
+    # Back button
+    if st.button("← Back to Main Dashboard", key="back_to_main_product_metrics"):
+        st.session_state.current_view = "main"
+        st.rerun()
+    
+    # Load product metrics data
+    with st.spinner("🔄 Loading product metrics data..."):
+        metrics_df = get_product_metrics_data()
+        
+        if metrics_df is None:
+            metrics_df = create_sample_product_metrics()
+            st.warning("⚠️ Using sample data. Connect to Google Sheets for real-time data.")
+        else:
+            st.success("✅ Data loaded from Google Sheets")
+    
+    if metrics_df.empty:
+        st.error("❌ No product metrics data available.")
+        return
+    
+    # Get list of month columns (exclude non-date columns)
+    month_columns = [col for col in metrics_df.columns if any(year in str(col) for year in ['2023', '2024', '2025'])]
+    
+    # Key metrics summary for latest month
+    if month_columns:
+        latest_month = month_columns[-1]
+        st.markdown(f"### 📈 Latest Month: **{latest_month}**")
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        with col1:
+            if 'AePS market share' in metrics_df.index:
+                market_share = str(metrics_df.loc['AePS market share', latest_month])
+                st.metric("Market Share", market_share, help="AePS market share percentage")
+        
+        with col2:
+            if 'AePS CW gtv (Cr)' in metrics_df.index:
+                gtv = str(metrics_df.loc['AePS CW gtv (Cr)', latest_month])
+                st.metric("GTV (Cr)", gtv, help="Cash Withdrawal GTV in Crores")
+        
+        with col3:
+            if 'SP winback' in metrics_df.index:
+                winback = str(metrics_df.loc['SP winback', latest_month])
+                st.metric("SP Winback", winback, help="Service Point winback count")
+        
+        with col4:
+            if 'CW transaction success rate' in metrics_df.index:
+                success_rate = str(metrics_df.loc['CW transaction success rate', latest_month])
+                st.metric("Success Rate", success_rate, help="Cash Withdrawal transaction success rate")
+        
+        with col5:
+            if 'VIP plan active SMAs' in metrics_df.index:
+                vip_smas = str(metrics_df.loc['VIP plan active SMAs', latest_month])
+                st.metric("VIP SMAs", vip_smas, help="Active VIP plan SMAs")
+    
+    # Tabs for different views
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📈 Winback Trends", 
+        "🎯 Market Performance",
+        "💰 GTV & Transactions",
+        "📊 All Metrics"
+    ])
+    
+    with tab1:
+        st.markdown("### 🔄 SP Winback Long-Term Trend")
+        
+        if 'SP winback' in metrics_df.index and month_columns:
+            # Prepare winback data
+            winback_data = metrics_df.loc['SP winback', month_columns]
+            
+            # Convert to numeric (handle commas)
+            winback_values = []
+            for val in winback_data:
+                try:
+                    clean_val = str(val).replace(',', '')
+                    winback_values.append(float(clean_val))
+                except:
+                    winback_values.append(0)
+            
+            # Create DataFrame for plotting
+            trend_df = pd.DataFrame({
+                'Month': month_columns,
+                'SP Winback': winback_values
+            })
+            
+            # Line chart
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=trend_df['Month'],
+                y=trend_df['SP Winback'],
+                mode='lines+markers',
+                name='SP Winback',
+                line=dict(color='#00CC96', width=3),
+                marker=dict(size=8),
+                fill='tozeroy',
+                fillcolor='rgba(0, 204, 150, 0.1)'
+            ))
+            
+            fig.update_layout(
+                title="SP Winback Trend (Long-Term)",
+                xaxis_title="Month",
+                yaxis_title="Winback Count",
+                height=400,
+                hovermode='x unified',
+                showlegend=False
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Stats
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Average Winback", f"{int(np.mean(winback_values)):,}")
+            with col2:
+                st.metric("Max Winback", f"{int(np.max(winback_values)):,}")
+            with col3:
+                st.metric("Min Winback", f"{int(np.min(winback_values)):,}")
+            with col4:
+                recent_change = ((winback_values[-1] - winback_values[-2]) / winback_values[-2] * 100) if len(winback_values) > 1 else 0
+                st.metric("Month-over-Month", f"{recent_change:+.1f}%")
+        
+        # Additional winback metrics
+        st.markdown("#### 📊 Related Metrics")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if 'SP winback' in metrics_df.index and 'SP Status Retained' in metrics_df.index:
+                st.markdown("**Winback vs Retention**")
+                
+                winback_vals = []
+                retention_vals = []
+                for month in month_columns[-6:]:  # Last 6 months
+                    try:
+                        winback_vals.append(float(str(metrics_df.loc['SP winback', month]).replace(',', '')))
+                        retention_vals.append(float(str(metrics_df.loc['SP Status Retained', month]).replace(',', '')))
+                    except:
+                        pass
+                
+                if winback_vals and retention_vals:
+                    comparison_df = pd.DataFrame({
+                        'Month': month_columns[-6:],
+                        'Winback': winback_vals,
+                        'Retained': retention_vals
+                    })
+                    
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(name='Winback', x=comparison_df['Month'], y=comparison_df['Winback'], marker_color='#00CC96'))
+                    fig.add_trace(go.Bar(name='Retained', x=comparison_df['Month'], y=comparison_df['Retained'], marker_color='#636EFA'))
+                    fig.update_layout(barmode='group', height=300)
+                    st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            if 'SP status retention ratio' in metrics_df.index:
+                st.markdown("**Retention Ratio Trend**")
+                retention_ratio_vals = []
+                for month in month_columns[-6:]:
+                    try:
+                        val_str = str(metrics_df.loc['SP status retention ratio', month]).replace('%', '')
+                        retention_ratio_vals.append(float(val_str))
+                    except:
+                        pass
+                
+                if retention_ratio_vals:
+                    ratio_df = pd.DataFrame({
+                        'Month': month_columns[-6:],
+                        'Retention %': retention_ratio_vals
+                    })
+                    
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=ratio_df['Month'], 
+                        y=ratio_df['Retention %'],
+                        mode='lines+markers',
+                        line=dict(color='#AB63FA', width=2),
+                        marker=dict(size=8)
+                    ))
+                    fig.update_layout(height=300, yaxis_title="Retention %")
+                    st.plotly_chart(fig, use_container_width=True)
+    
+    with tab2:
+        st.markdown("### 📊 Market Performance Trends")
+        
+        # Market share trend
+        if 'AePS market share' in metrics_df.index:
+            st.markdown("#### Market Share Evolution")
+            market_share_vals = []
+            for month in month_columns:
+                try:
+                    val_str = str(metrics_df.loc['AePS market share', month]).replace('%', '')
+                    market_share_vals.append(float(val_str))
+                except:
+                    pass
+            
+            if market_share_vals:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=month_columns,
+                    y=market_share_vals,
+                    mode='lines+markers',
+                    name='Market Share',
+                    line=dict(color='#FFA15A', width=3),
+                    marker=dict(size=6)
+                ))
+                fig.update_layout(
+                    xaxis_title="Month",
+                    yaxis_title="Market Share (%)",
+                    height=400,
+                    hovermode='x unified'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+        
+        # Success rates comparison
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if 'CW transaction success rate' in metrics_df.index:
+                st.markdown("#### Transaction Success Rate")
+                success_vals = []
+                for month in month_columns[-12:]:
+                    try:
+                        val_str = str(metrics_df.loc['CW transaction success rate', month]).replace('%', '')
+                        success_vals.append(float(val_str))
+                    except:
+                        pass
+                
+                if success_vals:
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=month_columns[-12:],
+                        y=success_vals,
+                        mode='lines+markers',
+                        line=dict(color='#00CC96', width=2),
+                        marker=dict(size=6),
+                        fill='tozeroy'
+                    ))
+                    fig.update_layout(height=300, yaxis_title="Success Rate (%)")
+                    st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            if 'CW customer success rate' in metrics_df.index:
+                st.markdown("#### Customer Success Rate")
+                cust_success_vals = []
+                for month in month_columns[-12:]:
+                    try:
+                        val_str = str(metrics_df.loc['CW customer success rate', month]).replace('%', '')
+                        cust_success_vals.append(float(val_str))
+                    except:
+                        pass
+                
+                if cust_success_vals:
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=month_columns[-12:],
+                        y=cust_success_vals,
+                        mode='lines+markers',
+                        line=dict(color='#AB63FA', width=2),
+                        marker=dict(size=6),
+                        fill='tozeroy'
+                    ))
+                    fig.update_layout(height=300, yaxis_title="Success Rate (%)")
+                    st.plotly_chart(fig, use_container_width=True)
+    
+    with tab3:
+        st.markdown("### 💰 GTV & Transaction Trends")
+        
+        # GTV trend
+        if 'AePS CW gtv (Cr)' in metrics_df.index:
+            st.markdown("#### Cash Withdrawal GTV (Crores)")
+            gtv_vals = []
+            for month in month_columns:
+                try:
+                    val_str = str(metrics_df.loc['AePS CW gtv (Cr)', month]).replace(',', '')
+                    gtv_vals.append(float(val_str))
+                except:
+                    pass
+            
+            if gtv_vals:
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    x=month_columns,
+                    y=gtv_vals,
+                    marker_color='#636EFA',
+                    name='GTV (Cr)'
+                ))
+                fig.update_layout(
+                    xaxis_title="Month",
+                    yaxis_title="GTV (Crores)",
+                    height=400,
+                    hovermode='x unified'
+                ))
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Stats
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Average GTV", f"₹{np.mean(gtv_vals):,.2f} Cr")
+                with col2:
+                    st.metric("Highest GTV", f"₹{np.max(gtv_vals):,.2f} Cr")
+                with col3:
+                    st.metric("Total (Period)", f"₹{np.sum(gtv_vals):,.2f} Cr")
+        
+        # Transaction volume
+        if 'AePS CW transactions' in metrics_df.index:
+            st.markdown("#### Transaction Volume Trend")
+            txn_vals = []
+            for month in month_columns:
+                try:
+                    val_str = str(metrics_df.loc['AePS CW transactions', month]).replace(',', '')
+                    txn_vals.append(float(val_str))
+                except:
+                    pass
+            
+            if txn_vals:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=month_columns,
+                    y=txn_vals,
+                    mode='lines+markers',
+                    line=dict(color='#EF553B', width=2),
+                    marker=dict(size=6),
+                    fill='tozeroy',
+                    fillcolor='rgba(239, 85, 59, 0.1)'
+                ))
+                fig.update_layout(
+                    xaxis_title="Month",
+                    yaxis_title="Transaction Count",
+                    height=400
+                )
+                st.plotly_chart(fig, use_container_width=True)
+    
+    with tab4:
+        st.markdown("### 📋 All Metrics Data Table")
+        
+        # Filters
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            search_term = st.text_input("🔍 Search metrics", placeholder="e.g., winback, GTV, success rate")
+        with col2:
+            show_recent = st.checkbox("Show last 6 months only", value=True)
+        
+        # Filter dataframe
+        display_df = metrics_df.copy()
+        
+        if search_term:
+            mask = display_df.index.str.contains(search_term, case=False, na=False)
+            display_df = display_df[mask]
+        
+        if show_recent and len(month_columns) > 6:
+            display_cols = month_columns[-6:]
+            display_df = display_df[display_cols]
+        
+        # Display table
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            height=600
+        )
+        
+        # Export button
+        if st.button("📥 Export Data", key="export_product_metrics"):
+            csv = display_df.to_csv()
+            st.download_button(
+                label="Download CSV",
+                data=csv,
+                file_name=f"product_metrics_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
 
 def get_sales_iteration_data():
     """
@@ -12430,6 +12860,8 @@ def main():
                     st.session_state.current_view = "detail_System Anomalies"
                 elif actual_name == 'Active Bugs':
                     st.session_state.current_view = "bugs_dashboard"
+                elif actual_name == 'Product Metrics & Trends':
+                    st.session_state.current_view = "product_metrics_dashboard"
                 elif actual_name == 'Bank Error Analysis':
                     st.session_state.current_view = "dashboard_Bank_Error_Analysis"
                 elif actual_name == 'Winback Conversion':
@@ -12661,6 +13093,10 @@ def main():
     # Bugs dashboard
     elif st.session_state.current_view == "bugs_dashboard":
         show_bugs_dashboard()
+    
+    # Product Metrics dashboard
+    elif st.session_state.current_view == "product_metrics_dashboard":
+        show_product_metrics_dashboard()
     
     # Anomalies detailed view
     elif st.session_state.current_view == "detail_System Anomalies":
