@@ -6610,7 +6610,7 @@ def show_product_metrics_dashboard():
                     yaxis_title="GTV (Crores)",
                     height=400,
                     hovermode='x unified'
-                ))
+                )
                 st.plotly_chart(fig, use_container_width=True)
                 
                 # Stats
