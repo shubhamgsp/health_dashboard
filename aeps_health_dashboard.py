@@ -5081,12 +5081,27 @@ def get_dummy_metrics_for_remaining():
             }
         }
         
-        # Add Active Bugs - Real data from CSV
+        # Add Active Bugs - Real data from Google Sheets (with CSV fallback)
         try:
-            bugs_data = get_bugs_data_from_csv()
-            if bugs_data is not None and not bugs_data.empty:
-                # Count active bugs (status != 'Closed' or 'Resolved')
-                active_bugs = len(bugs_data[~bugs_data['Status'].isin(['Closed', 'Resolved', 'Done'])])
+            # Try Google Sheets first for real-time updates
+            bugs_df = get_google_sheets_data('Bugs', None)
+            
+            # Fallback to CSV if Google Sheets not available
+            if bugs_df is None or bugs_df.empty:
+                csv_path = "bugs_data.csv"
+                if os.path.exists(csv_path):
+                    bugs_df = pd.read_csv(csv_path)
+            
+            if bugs_df is not None and not bugs_df.empty:
+                # Normalize column names (handle both lowercase and uppercase)
+                bugs_df.columns = bugs_df.columns.str.strip().str.lower()
+                
+                # Count active bugs (status is 'open', 'pending', or 'wip')
+                active_statuses = ['open', 'pending', 'wip']
+                if 'status' in bugs_df.columns:
+                    active_bugs = len(bugs_df[bugs_df['status'].str.lower().isin(active_statuses)])
+                else:
+                    active_bugs = 0
                 
                 # Determine status based on count
                 if active_bugs <= 2:
@@ -5105,7 +5120,7 @@ def get_dummy_metrics_for_remaining():
                 }
             else:
                 operations['Active Bugs'] = {'value': 2, 'status': 'green', 'trend': 'down', 'change': -1, 'unit': ''}
-        except Exception:
+        except Exception as e:
             operations['Active Bugs'] = {'value': 2, 'status': 'green', 'trend': 'down', 'change': -1, 'unit': ''}
         
         # Other operations metrics (keeping as fallback)
