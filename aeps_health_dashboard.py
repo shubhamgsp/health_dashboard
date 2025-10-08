@@ -1450,6 +1450,75 @@ def get_new_user_analytics():
         return None, None, None
 
 @st.cache_data(ttl=3600)  # Cache for 1 hour
+def get_cash_product_analytics():
+    """Fetch cash product users and penetration analytics from BigQuery"""
+    try:
+        client = get_bigquery_client()
+        if not client:
+            return None
+            
+        # Get table references
+        csp_timeline_table = get_table_ref(os.getenv('BIGQUERY_DATASET_ANALYTICS', 'analytics_dwh'), os.getenv('CSP_MONTHLY_TIMELINE_TABLE', 'csp_monthly_timeline'))
+        
+        # Cash product analytics query
+        cash_product_query = f"""
+        WITH monthly_data AS (
+          SELECT
+            DATE_TRUNC(PARSE_DATE('%Y%m', CAST(year_month AS STRING)), MONTH) AS month_start,
+            agent_id,
+            -- Cash products: DMT, CMS, BBPS, Recharge
+            COALESCE(SUM(dmt_gtv_success + cms_gtv_success + bbps_gtv_success + recharge_gtv_success), 0) AS cash_gtv,
+            COALESCE(SUM(dmt_txn_cnt_success + cms_txn_cnt_success + bbps_txn_cnt_success + recharge_txn_cnt_success), 0) AS cash_txn_cnt,
+            -- AEPS products for penetration calculation
+            COALESCE(SUM(aeps_gtv_success), 0) AS aeps_gtv,
+            COALESCE(SUM(aeps_txn_cnt_success), 0) AS aeps_txn_cnt
+          FROM {csp_timeline_table}
+          WHERE PARSE_DATE('%Y%m', CAST(year_month AS STRING))
+                >= DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 2 MONTH)
+          GROUP BY month_start, agent_id
+        ),
+        month_summary AS (
+          SELECT
+            month_start,
+            -- Active cash product users (agents with any cash product activity)
+            COUNT(DISTINCT CASE WHEN cash_gtv > 0 THEN agent_id END) AS active_cash_users,
+            -- Total AEPS users (agents with AEPS activity)
+            COUNT(DISTINCT CASE WHEN aeps_gtv > 0 THEN agent_id END) AS total_aeps_users,
+            -- Penetration: % of AEPS users also using cash products
+            ROUND(SAFE_DIVIDE(
+              COUNT(DISTINCT CASE WHEN cash_gtv > 0 THEN agent_id END),
+              COUNT(DISTINCT CASE WHEN aeps_gtv > 0 THEN agent_id END)
+            ) * 100, 1) AS penetration_rate,
+            -- Total GTV for context
+            SUM(cash_gtv) AS total_cash_gtv,
+            SUM(cash_txn_cnt) AS total_cash_txns
+          FROM monthly_data
+          GROUP BY month_start
+        )
+        SELECT
+          month_start,
+          active_cash_users,
+          total_aeps_users,
+          penetration_rate,
+          total_cash_gtv,
+          total_cash_txns
+        FROM month_summary
+        ORDER BY month_start DESC
+        LIMIT 3
+        """
+        
+        df = client.query(cash_product_query).to_dataframe()
+        
+        if df.empty:
+            return None
+            
+        return df
+        
+    except Exception as e:
+        st.error(f"Error fetching cash product analytics: {str(e)}")
+        return None
+
+@st.cache_data(ttl=3600)  # Cache for 1 hour
 def get_stable_users_analytics():
     """Fetch stable SP and Tail user analytics with long-term trends"""
     try:
@@ -4910,9 +4979,48 @@ def get_dummy_metrics_for_remaining():
         # Fallback to dummy on error
         supporting_rails['Login Success Rate'] = {'value': 97.8, 'status': 'green', 'trend': 'up', 'change': 0.5}
     
+    # Cash Product - Real data from BigQuery
+    try:
+        cash_product_data = get_cash_product_analytics()
+        if cash_product_data is not None and not cash_product_data.empty:
+            # Get current month (most recent)
+            current_month = cash_product_data.iloc[0]
+            current_penetration = float(current_month['penetration_rate'])
+            current_users = int(current_month['active_cash_users'])
+            
+            # Get last month for comparison
+            if len(cash_product_data) > 1:
+                last_month = cash_product_data.iloc[1]
+                last_penetration = float(last_month['penetration_rate'])
+                change = round(current_penetration - last_penetration, 1)
+            else:
+                change = 0
+            
+            # Determine status based on penetration rate
+            if current_penetration >= 90:
+                cash_status = 'green'
+            elif current_penetration >= 75:
+                cash_status = 'yellow'
+            else:
+                cash_status = 'red'
+            
+            supporting_rails['Cash Product'] = {
+                'value': current_penetration,
+                'status': cash_status,
+                'trend': 'up' if change > 0 else 'down' if change < 0 else 'stable',
+                'change': change,
+                'unit': '%',
+                'active_users': current_users,
+                'tooltip': f'{current_users:,} active cash product users'
+            }
+        else:
+            # Fallback to dummy
+            supporting_rails['Cash Product'] = {'value': 95.1, 'status': 'green', 'trend': 'stable', 'change': 0.1}
+    except Exception as e:
+        supporting_rails['Cash Product'] = {'value': 95.1, 'status': 'green', 'trend': 'stable', 'change': 0.1}
+    
     # Other supporting rails (keeping as fallback until data sources added)
     supporting_rails.update({
-        'Cash Product': {'value': 95.1, 'status': 'green', 'trend': 'stable', 'change': 0.1},
         'CC Calls Metric': {'value': 89.4, 'status': 'green', 'trend': 'stable', 'change': -0.3},
         'Bot Detection': {'value': 15.7, 'status': 'red', 'trend': 'up', 'change': 4.1}
     })
