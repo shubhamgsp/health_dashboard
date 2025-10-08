@@ -9,6 +9,11 @@ import random
 import calendar
 import os
 import warnings
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
 warnings.filterwarnings('ignore')
 
 # Google Cloud imports (for real data integration)
@@ -23,10 +28,10 @@ except ImportError:
 
 # Page configuration
 st.set_page_config(
-    page_title="AEPS Health Monitor Enhanced",
-    page_icon="🏥",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title=os.getenv("STREAMLIT_PAGE_TITLE", "AEPS Health Monitor Enhanced"),
+    page_icon=os.getenv("STREAMLIT_PAGE_ICON", "🏥"),
+    layout=os.getenv("STREAMLIT_LAYOUT", "wide"),
+    initial_sidebar_state=os.getenv("STREAMLIT_SIDEBAR_STATE", "expanded")
 )
 
 # Custom CSS for enhanced styling
@@ -220,14 +225,14 @@ st.markdown("""
 @st.cache_data(show_spinner=True, ttl=300)
 def load_bank_error_data(_client: bigquery.Client) -> pd.DataFrame:
     """Load bank error analysis data"""
-    query = """
+    query = f"""
     -- Pre-aggregate t2 to reduce scanned bytes
     WITH t2_agg AS (
         SELECT 
             request_id,
             rc,
             response_message
-        FROM `spicemoney-dwh.prod_dwh.aeps_trans_res`
+        FROM {get_table_ref(os.getenv('BIGQUERY_DATASET_PROD', 'prod_dwh'), os.getenv('AEPS_TRANS_RES_TABLE', 'aeps_trans_res'))}
         WHERE log_date_time BETWEEN TIMESTAMP(DATE_TRUNC(DATE_SUB(DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY), INTERVAL 3 MONTH), MONTH))
                                 AND TIMESTAMP_SUB(TIMESTAMP(DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)), INTERVAL 1 SECOND)
           AND rc IS NOT NULL 
@@ -242,7 +247,7 @@ def load_bank_error_data(_client: bigquery.Client) -> pd.DataFrame:
             t2.rc,
             t2.response_message,
             COUNT(DISTINCT t1.spice_tid) AS error_txn
-        FROM `spicemoney-dwh.prod_dwh.aeps_trans_req` t1
+        FROM {get_table_ref(os.getenv('BIGQUERY_DATASET_PROD', 'prod_dwh'), os.getenv('AEPS_TRANS_REQ_TABLE', 'aeps_trans_req'))} t1
         JOIN t2_agg t2
           ON t1.request_id = t2.request_id
         WHERE t1.log_date_time BETWEEN TIMESTAMP(DATE_TRUNC(DATE_SUB(DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY), INTERVAL 3 MONTH), MONTH))
@@ -264,7 +269,7 @@ def load_bank_error_data(_client: bigquery.Client) -> pd.DataFrame:
             t1.cust_bank_name,
             DATE_TRUNC(DATE(t1.log_date_time), MONTH) AS month,
             COUNT(DISTINCT t1.spice_tid) AS total_txn
-        FROM `spicemoney-dwh.prod_dwh.aeps_trans_req` t1
+        FROM {get_table_ref(os.getenv('BIGQUERY_DATASET_PROD', 'prod_dwh'), os.getenv('AEPS_TRANS_REQ_TABLE', 'aeps_trans_req'))} t1
         WHERE t1.log_date_time BETWEEN TIMESTAMP(DATE_TRUNC(DATE_SUB(DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY), INTERVAL 3 MONTH), MONTH))
                                   AND TIMESTAMP_SUB(TIMESTAMP(DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)), INTERVAL 1 SECOND)
           AND t1.cust_bank_name IN (
@@ -627,7 +632,7 @@ def show_bank_error_dashboard():
             else:
                 st.info("No alert data available for the current period")
         
-        st.caption("Data source: spicemoney-dwh.prod_dwh.aeps_trans_req & aeps_trans_res")
+        st.caption(f"Data source: {os.getenv('BIGQUERY_PROJECT_ID', 'spicemoney-dwh')}.{os.getenv('BIGQUERY_DATASET_PROD', 'prod_dwh')}.{os.getenv('AEPS_TRANS_REQ_TABLE', 'aeps_trans_req')} & {os.getenv('AEPS_TRANS_RES_TABLE', 'aeps_trans_res')}")
         
     except Exception as e:
         st.error(f"Error loading bank error data: {str(e)}")
@@ -638,23 +643,21 @@ def show_bank_error_dashboard():
 def get_bigquery_client():
     """Initialize BigQuery client"""
     try:
-        if os.path.exists('spicemoney-dwh.json'):
-            scope = [
-                'https://spreadsheets.google.com/feeds',
-                'https://www.googleapis.com/auth/drive',
-                'https://www.googleapis.com/auth/spreadsheets',
-                'https://www.googleapis.com/auth/cloud-platform',
-                "https://www.googleapis.com/auth/bigquery"
-            ]
+        credentials_file = os.getenv("BIGQUERY_CREDENTIALS_FILE", "spicemoney-dwh.json")
+        project_id = os.getenv("BIGQUERY_PROJECT_ID", "spicemoney-dwh")
+        
+        if os.path.exists(credentials_file):
+            scope = os.getenv("GOOGLE_SHEETS_SCOPES", 
+                "https://spreadsheets.google.com/feeds,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/bigquery").split(',')
             
             credentials = service_account.Credentials.from_service_account_file(
-                'spicemoney-dwh.json', 
+                credentials_file, 
                 scopes=scope
             )
             
             client = bigquery.Client(
                 credentials=credentials, 
-                project=credentials.project_id
+                project=project_id
             )
             
             return client
@@ -665,6 +668,11 @@ def get_bigquery_client():
     except Exception as e:
         st.error(f"❌ Error initializing BigQuery: {str(e)}")
         return None
+
+def get_table_ref(dataset, table):
+    """Get full table reference using environment variables"""
+    project_id = os.getenv("BIGQUERY_PROJECT_ID", "spicemoney-dwh")
+    return f"`{project_id}.{dataset}.{table}`"
 
 def get_bank_initials(bank_name):
     """Get bank initials for better chart readability"""
@@ -707,8 +715,8 @@ def get_bank_wise_transaction_data(selected_date, client):
                 t1.cust_bank_name,
                 COUNT(DISTINCT t1.spice_tid) as successful_txn,
                 SUM(t1.trans_amt) as successful_volume
-            FROM `spicemoney-dwh.prod_dwh.aeps_trans_req` t1
-            JOIN `spicemoney-dwh.prod_dwh.aeps_trans_res` t2
+            FROM {get_table_ref(os.getenv('BIGQUERY_DATASET_PROD', 'prod_dwh'), os.getenv('AEPS_TRANS_REQ_TABLE', 'aeps_trans_req'))} t1
+            JOIN {get_table_ref(os.getenv('BIGQUERY_DATASET_PROD', 'prod_dwh'), os.getenv('AEPS_TRANS_RES_TABLE', 'aeps_trans_res'))} t2
               ON t1.request_id = t2.request_id
             WHERE DATE(t1.log_date_time) BETWEEN '{start_date}' AND '{selected_date}'
               AND DATE(t2.log_date_time) BETWEEN '{start_date}' AND '{selected_date}'
@@ -738,7 +746,7 @@ def get_bank_wise_transaction_data(selected_date, client):
                 cust_bank_name,
                 COUNT(DISTINCT spice_tid) as total_txn,
                 SUM(trans_amt) as total_volume
-            FROM `spicemoney-dwh.prod_dwh.aeps_trans_req`
+            FROM {get_table_ref(os.getenv('BIGQUERY_DATASET_PROD', 'prod_dwh'), os.getenv('AEPS_TRANS_REQ_TABLE', 'aeps_trans_req'))}
             WHERE DATE(log_date_time) BETWEEN '{start_date}' AND '{selected_date}'
               AND cust_bank_name IS NOT NULL
               AND cust_bank_name IN (
@@ -857,13 +865,13 @@ def get_distributor_churn_data():
          SELECT
            agent_id,
            DATE_TRUNC(CAST(month_year AS DATE), MONTH) AS txn_month
-         FROM `spicemoney-dwh.analytics_dwh.csp_monthly_timeline_with_tu`
+         FROM {get_table_ref(os.getenv('BIGQUERY_DATASET_ANALYTICS', 'analytics_dwh'), os.getenv('CSP_MONTHLY_TIMELINE_WITH_TU_TABLE', 'csp_monthly_timeline_with_tu'))}
          WHERE total_gtv_amt >= 250000
            AND CAST(month_year AS DATE) BETWEEN DATE_SUB(s_date, INTERVAL 4 MONTH)
                                         AND DATE_SUB(s_date, INTERVAL 1 DAY)
         ) a
          ON a.txn_month = m.month_start
-        JOIN `spicemoney-dwh.prod_dwh.client_details` d
+        JOIN {get_table_ref(os.getenv('BIGQUERY_DATASET_PROD', 'prod_dwh'), os.getenv('CLIENT_DETAILS_TABLE', 'client_details'))} d
          ON a.agent_id = d.retailer_id
         GROUP BY distributor_id, m.label
         ),
@@ -898,14 +906,14 @@ def get_distributor_churn_data():
            CASE WHEN SUM(aeps_gtv_success + ap_gtv_success + matm_gtv_success) > 0 THEN 1 ELSE 0 END AS cashout_txn_sma,
            CASE WHEN SUM(m2b_gtv_success) > 0 THEN 1 ELSE 0 END AS m2b_txn_sma,
            CASE WHEN SUM(total_gtv_amt) > 0 THEN 1 ELSE 0 END AS txn_sma
-         FROM `spicemoney-dwh.analytics_dwh.csp_monthly_timeline`
+         FROM {get_table_ref(os.getenv('BIGQUERY_DATASET_ANALYTICS', 'analytics_dwh'), os.getenv('CSP_MONTHLY_TIMELINE_TABLE', 'csp_monthly_timeline'))}
          WHERE PARSE_DATE('%Y%m', CAST(year_month AS STRING))
                BETWEEN DATE_SUB(s_date, INTERVAL 4 MONTH)
                    AND DATE_SUB(s_date, INTERVAL 1 DAY)
          GROUP BY agent_id, DATE_TRUNC(PARSE_DATE('%Y%m', CAST(year_month AS STRING)), MONTH)
         ) a
          ON a.txn_month = m.month_start
-        JOIN `spicemoney-dwh.prod_dwh.client_master` b
+        JOIN {get_table_ref(os.getenv('BIGQUERY_DATASET_PROD', 'prod_dwh'), os.getenv('CLIENT_MASTER_TABLE', 'client_master'))} b
          ON a.agent_id = b.client_id
         GROUP BY distributor_id, m.label
         ),
@@ -926,7 +934,7 @@ def get_distributor_churn_data():
          and COALESCE(a.md_code, 'x') <> COALESCE(a.retailer_id, 'y')
          ) a join prod_dwh.client_details b
          on a.md_code = b.retailer_id)d
-        left join `spicemoney-dwh.analytics_dwh.v_client_pincode` c
+        left join {get_table_ref(os.getenv('BIGQUERY_DATASET_ANALYTICS', 'analytics_dwh'), os.getenv('V_CLIENT_PINCODE_TABLE', 'v_client_pincode'))} c
         on d.md_code=c.retailer_id
         )
         SELECT * ,(tag_cash_gtv+  tag_cash_out_gtv+ tag_txn_sma+  tag_high_gtv_sps)SUM_ALL FROM (
@@ -1030,7 +1038,10 @@ def get_priority_distributor_churn_data():
             st.warning("⚠️ Priority Distributor Churn: No BigQuery client available")
             return None
             
-        priority_churn_query = """
+        # Get table reference
+        distributor_churn_table = get_table_ref(os.getenv('BIGQUERY_DATASET_ANALYTICS', 'analytics_dwh'), os.getenv('DISTRIBUTORWISE_AGENT_CHURN_TABLE', 'distributorwise_agent_churn_data_master_live'))
+        
+        priority_churn_query = f"""
         SELECT *,
         case
         when severity= 'Very-High Risk' then 'P0'
@@ -1040,7 +1051,7 @@ def get_priority_distributor_churn_data():
         when severity='Low Risk' then 'P4'
         when severity='New Risk' then 'P5'
         END priority_tag
-        FROM `spicemoney-dwh.analytics_dwh.distributorwise_agent_churn_data_master_live` 
+        FROM {distributor_churn_table} 
         where report_date =last_day(date_sub(current_date-1, INTERVAL 1 month))
         and smas_affected>=5
         """
@@ -1075,11 +1086,16 @@ def get_rfm_fraud_data():
             st.warning("⚠️ RFM: No BigQuery client available")
             return None
             
-        rfm_query = """
+        # Get table references
+        ground_truth_table = get_table_ref(os.getenv('BIGQUERY_DATASET_ANALYTICS', 'analytics_dwh'), os.getenv('GROUND_TRUTH_FRAUDS_TABLE', 'Ground_Truth_Frauds_sanitised_check_blank'))
+        fraud_risk_table = get_table_ref(os.getenv('BIGQUERY_DATASET_FRAUD', 'fraud_risk_data'), os.getenv('FM_LOG_RISK_SCORE_TABLE', 'fm_log_risk_score'))
+        rfm_web_table = get_table_ref(os.getenv('BIGQUERY_DATASET_ANALYTICS', 'analytics_dwh'), os.getenv('RFM_WEB_V2_HOURLY_TABLE', 'rfm_web_v2_hourly'))
+        
+        rfm_query = f"""
         with fraud_data as
          ( select trans_mode ,client_id,log_date,  date_trunc(date(log_date), month) AS year_month,
          row_number()over(partition by client_id order by log_date)rn,amount,master_trans_type
-        from `spicemoney-dwh.analytics_dwh.Ground_Truth_Frauds_sanitised_check_blank`
+        from {ground_truth_table}
         
         
         where log_date>=date_trunc(date_sub(date(current_date -1), interval 3 month), month)
@@ -1090,12 +1106,12 @@ def get_rfm_fraud_data():
         (
          select distinct client_id,date(log_date_time)date,
          date_trunc(date_sub(date(log_date_time), interval 0 month), month)year_month,'APP' Fraud_utility_type
-         from `spicemoney-dwh.fraud_risk_data.fm_log_risk_score` 
+         from {fraud_risk_table} 
          where date(log_date_time)>=date_trunc(date_sub(date(current_date -1), interval 3 month), month)
         ),
         web_data as(
             
-        select distinct agent_id,'BLOCKED' status,date(date)date,date_trunc(date(date), month) AS year_month,'WEB' Fraud_utility_type from `spicemoney-dwh.analytics_dwh.rfm_web_v2_hourly`        
+        select distinct agent_id,'BLOCKED' status,date(date)date,date_trunc(date(date), month) AS year_month,'WEB' Fraud_utility_type from {rfm_web_table}        
         where date(date)>=date_trunc(date_sub(date(current_date -1), interval 3 month), month) 
         
         
@@ -1204,8 +1220,11 @@ def get_new_user_analytics():
         if not client:
             return None, None, None
             
+        # Get table references
+        client_details_table = get_table_ref(os.getenv('BIGQUERY_DATASET_PROD', 'prod_dwh'), os.getenv('CLIENT_DETAILS_TABLE', 'client_details'))
+        
         # Overall gross add query - compare like-to-like (first N days of current month vs first N days of last month)
-        overall_query = """
+        overall_query = f"""
         with date_params as (
           select 
             current_date() as today,
@@ -1215,13 +1234,13 @@ def get_new_user_analytics():
         ),
         current_month_mtd as (
           select count(distinct retailer_id) as current_gross_add
-          from `spicemoney-dwh.prod_dwh.client_details`, date_params dp
+          from {client_details_table}, date_params dp
           where date(creation_date) >= dp.current_month_start
             and date(creation_date) <= dp.today
         ),
         last_month_same_period as (
           select count(distinct retailer_id) as last_month_gross_add
-          from `spicemoney-dwh.prod_dwh.client_details`, date_params dp
+          from {client_details_table}, date_params dp
           where date(creation_date) >= dp.last_month_start
             and date(creation_date) <= date_add(dp.last_month_start, interval dp.current_day_of_month - 1 day)
         )
@@ -1233,13 +1252,13 @@ def get_new_user_analytics():
         """
         
         # MD-wise gross add query
-        md_wise_query = """
+        md_wise_query = f"""
         with md_wise_gross_add as (
            select 
                md_code,
                date_trunc(date(creation_date), month) as year_month,
                count(distinct retailer_id) as gross_add
-           from `spicemoney-dwh.prod_dwh.client_details`
+           from {client_details_table}
            where date(creation_date) >= date_trunc(date_sub(current_date(), interval 3 month), month)
            group by md_code, year_month
         )
@@ -1247,13 +1266,13 @@ def get_new_user_analytics():
         """
         
         # AEPS transacting status query
-        aeps_activation_query = """
+        aeps_activation_query = f"""
         with new_agents as (
            select 
                format_date('%Y%m', date(creation_date)) as month_year,
                retailer_id as agent_id,
                date(creation_date) as creation_date
-           from `spicemoney-dwh.prod_dwh.client_details`
+           from {client_details_table}
            where date(creation_date) >= date_trunc(date_sub(current_date(), interval 6 month), month)
         ),
         txn_agents_30 as (
@@ -1340,8 +1359,11 @@ def get_stable_users_analytics():
         if not client:
             return None, None
             
+        # Get table references
+        csp_timeline_table = get_table_ref(os.getenv('BIGQUERY_DATASET_ANALYTICS', 'analytics_dwh'), os.getenv('CSP_MONTHLY_TIMELINE_TABLE', 'csp_monthly_timeline'))
+        
         # Stable SP agents query
-        stable_sp_query = """
+        stable_sp_query = f"""
         -- Step 1: Generate last 3 reference months dynamically (current + 2 previous)
         WITH ref_months AS (
           SELECT DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL n MONTH), MONTH) AS ref_month
@@ -1354,7 +1376,7 @@ def get_stable_users_analytics():
             DATE_TRUNC(PARSE_DATE('%Y%m', CAST(year_month AS STRING)), MONTH) AS month_start,
             SUM(COALESCE(aeps_gtv_success, 0)) AS monthly_gtv,
             SUM(COALESCE(aeps_txn_cnt_success, 0)) AS monthly_txn_cnt
-          FROM `spicemoney-dwh.analytics_dwh.csp_monthly_timeline`
+          FROM {csp_timeline_table}
           WHERE PARSE_DATE('%Y%m', CAST(year_month AS STRING))
                 >= DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 7 MONTH) -- enough lookback
           GROUP BY agent_id, DATE_TRUNC(PARSE_DATE('%Y%m', CAST(year_month AS STRING)), MONTH)
@@ -1425,7 +1447,7 @@ def get_stable_users_analytics():
             DATE_TRUNC(PARSE_DATE('%Y%m', CAST(year_month AS STRING)), MONTH) AS month_start,
             SUM(COALESCE(aeps_gtv_success, 0)) AS monthly_gtv,
             SUM(COALESCE(aeps_txn_cnt_success, 0)) AS monthly_txn_cnt
-          FROM `spicemoney-dwh.analytics_dwh.csp_monthly_timeline`
+          FROM {csp_timeline_table}
           WHERE PARSE_DATE('%Y%m', CAST(year_month AS STRING))
                 >= DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 15 MONTH)
           GROUP BY agent_id, DATE_TRUNC(PARSE_DATE('%Y%m', CAST(year_month AS STRING)), MONTH)
@@ -1884,9 +1906,12 @@ def get_churn_data():
         if client is None:
             return pd.DataFrame()
         
-        query = """
+        # Get table reference
+        churn_table = get_table_ref(os.getenv('BIGQUERY_DATASET_ANALYTICS', 'analytics_dwh'), 'Aeps_MoM_Churn_status')
+        
+        query = f"""
         SELECT *
-        FROM `spicemoney-dwh.analytics_dwh.Aeps_MoM_Churn_status`
+        FROM {churn_table}
         """
         
         df = client.query(query).result().to_dataframe()
@@ -2014,7 +2039,11 @@ def get_m2b_pendency_data():
         # Try to get real data from BigQuery first
         client = get_bigquery_client()
         if client is not None:
-            query = """
+            # Get table references
+            h2h_table = get_table_ref(os.getenv('BIGQUERY_DATASET_PROD', 'prod_dwh'), os.getenv('H2H_TRANSACTIONS_TABLE', 'h2h_transactions'))
+            aeps_c2b_table = get_table_ref(os.getenv('BIGQUERY_DATASET_PROD', 'prod_dwh'), os.getenv('AEPS_C2B_H2H_REQ_TABLE', 'aeps_c2b_h2h_req'))
+            
+            query = f"""
             -- M2B Pendency Analysis Query
             -- Time buckets sorted in ascending order
             -- Note: 0 min and 1-4 min are considered "No Pendency" (immediate processing)
@@ -2029,8 +2058,8 @@ def get_m2b_pendency_data():
                   ELSE '0 min'
               END AS time_bucket,
               COUNT(DISTINCT a.UNIQUE_REQUEST_NO) AS client_count
-            FROM `spicemoney-dwh.prod_dwh.h2h_transactions` a
-            LEFT JOIN `spicemoney-dwh.prod_dwh.aeps_c2b_h2h_req` b
+            FROM {h2h_table} a
+            LEFT JOIN {aeps_c2b_table} b
               ON a.UNIQUE_REQUEST_NO = b.c2b_request_id
             WHERE DATE(a.LOG_DATE_TIME) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
              AND DATE(a.LOG_DATE_TIME) < CURRENT_DATE()
@@ -2280,7 +2309,7 @@ def get_real_bigquery_data(query_name, selected_date, _client):
 
         WITH insert_data AS (
           SELECT * 
-          FROM spicemoney-dwh.ds_striim.T_AEPSR_TRANSACTION_RES
+          FROM {get_table_ref(os.getenv('BIGQUERY_DATASET_DS', 'ds_striim'), os.getenv('AEPSR_TRANSACTION_RES_TABLE', 'T_AEPSR_TRANSACTION_RES'))}
           WHERE DATE(op_time) BETWEEN last_7_days_start AND today
             AND op_name = 'INSERT'
         ),
@@ -2288,7 +2317,7 @@ def get_real_bigquery_data(query_name, selected_date, _client):
           SELECT * EXCEPT(rn)
           FROM (
             SELECT *, ROW_NUMBER() OVER (PARTITION BY request_id ORDER BY op_time DESC) rn
-            FROM spicemoney-dwh.ds_striim.T_AEPSR_TRANSACTION_RES
+            FROM {get_table_ref(os.getenv('BIGQUERY_DATASET_DS', 'ds_striim'), os.getenv('AEPSR_TRANSACTION_RES_TABLE', 'T_AEPSR_TRANSACTION_RES'))}
             WHERE DATE(op_time) BETWEEN last_7_days_start AND today
               AND op_name = 'UPDATE'
           )
@@ -2316,7 +2345,7 @@ def get_real_bigquery_data(query_name, selected_date, _client):
             master_trans_type, 
             trans_mode, 
             AGGREGATOR
-          FROM spicemoney-dwh.ds_striim.T_AEPSR_TRANSACTION_REQ
+          FROM {get_table_ref(os.getenv('BIGQUERY_DATASET_DS', 'ds_striim'), os.getenv('AEPSR_TRANSACTION_REQ_TABLE', 'T_AEPSR_TRANSACTION_REQ'))}
           WHERE DATE(op_time) BETWEEN last_7_days_start AND today
         ),
         aeps_device_details AS (
@@ -2487,13 +2516,13 @@ def get_real_bigquery_data(query_name, selected_date, _client):
 
             WITH insert_data AS (
               SELECT * 
-              FROM `spicemoney-dwh.ds_striim.T_AEPSR_BIO_AUTH_LOGGING_P` 
+              FROM {get_table_ref(os.getenv('BIGQUERY_DATASET_DS', 'ds_striim'), os.getenv('AEPSR_BIO_AUTH_LOGGING_TABLE', 'T_AEPSR_BIO_AUTH_LOGGING_P'))} 
               WHERE DATE(OP_TIME)  BETWEEN last_7_days_start AND today
                 AND OP_NAME = 'INSERT'
             ),
             update_data AS (
               SELECT * 
-              FROM `spicemoney-dwh.ds_striim.T_AEPSR_BIO_AUTH_LOGGING_P` 
+              FROM {get_table_ref(os.getenv('BIGQUERY_DATASET_DS', 'ds_striim'), os.getenv('AEPSR_BIO_AUTH_LOGGING_TABLE', 'T_AEPSR_BIO_AUTH_LOGGING_P'))} 
               WHERE DATE(OP_TIME)  BETWEEN last_7_days_start AND today
                 AND OP_NAME = 'UPDATE'
             ),
@@ -3246,18 +3275,18 @@ def show_cash_product_dashboard():
         SELECT *, 'cc_connect' reached_cc
         FROM (SELECT date_trunc(date(a.created_on),month) AS day, (a.created_on) AS date, customer_ref_id, customer_mobile mobile,
                      CONCAT(b.Product, ' - ', b.Stage) AS product_stage, outcome, sub_outcome   
-              FROM `spicemoney-dwh.ds_ameyo_data.complaint_data` a   
-              LEFT JOIN `spicemoney-dwh.analytics_dwh.Complaint_tag` b ON UPPER(a.sub_outcome) = UPPER(b.Labels)  
+              FROM {get_table_ref('ds_ameyo_data', 'complaint_data')} a   
+              LEFT JOIN {get_table_ref(os.getenv('BIGQUERY_DATASET_ANALYTICS', 'analytics_dwh'), 'Complaint_tag')} b ON UPPER(a.sub_outcome) = UPPER(b.Labels)  
               WHERE DATE(a.created_on) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) and source_ic != 'SelfCare'  
               union all  
               (SELECT date_trunc(date(a.created_date),month) AS day, (a.created_date) AS date, customer_ref_id, mobile,
                       CONCAT(b.Product, ' - ', b.Stage) AS product_stage, outcome, sub_outcome   
                FROM `spicemoney-dwh.ds_ameyo_data.query_data` a   
-               LEFT JOIN `spicemoney-dwh.analytics_dwh.Complaint_tag` b ON UPPER(a.sub_outcome) = UPPER(b.Labels)  
+               LEFT JOIN {get_table_ref(os.getenv('BIGQUERY_DATASET_ANALYTICS', 'analytics_dwh'), 'Complaint_tag')} b ON UPPER(a.sub_outcome) = UPPER(b.Labels)  
                WHERE DATE(a.created_date) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY))
         )
         ),
-        onboarded_spice as (select retailer_id, mobile_number from `spicemoney-dwh.prod_dwh.client_details`)
+        onboarded_spice as (select retailer_id, mobile_number from {get_table_ref(os.getenv('BIGQUERY_DATASET_PROD', 'prod_dwh'), os.getenv('CLIENT_DETAILS_TABLE', 'client_details'))})
         select count(*)total_session, count(distinct unique_session_id)no_unique_session,
                count(distinct case when turn_position=1 then user_id end)no_unique_user,
                count(distinct case when max_turn=1 and session_termination_status= 'Terminated Properly' then unique_session_id end)end_session_proper,
