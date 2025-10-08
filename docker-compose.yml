@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  aeps-dashboard:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      - DASHBOARD_PASSWORD=your-secure-password
+      - GOOGLE_CREDENTIALS_PATH=spicemoney-dwh.json
+    volumes:
+      - ./bugs_data.csv:/app/bugs_data.csv:ro
+      - ./spicemoney-dwh.json:/app/spicemoney-dwh.json:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
