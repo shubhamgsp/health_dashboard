@@ -23,7 +23,32 @@ GLOBAL_CACHED_DATA = {
     'daily_metrics': None,
     'google_sheets': None,
     'last_refresh': None,
-    'refresh_count': 0
+    'refresh_count': 0,
+    'tile_refresh_times': {
+        # Core AEPS - Hourly refresh (9 AM - 9 PM)
+        '2fa_success': None,
+        'transaction_success': None,
+        'gtv_performance': None,
+        'bank_error': None,
+        'platform_uptime': None,
+        # Daily refresh tiles
+        'cash_product': None,
+        'login_success': None,
+        'm2b_pendency': None,
+        'cc_calls': None,
+        'bot_analytics': None,
+        'rfm_score': None,
+        'new_users': None,
+        'churn_rate': None,
+        'stable_users': None,
+        'winback_conversion': None,
+        'sales_iteration': None,
+        'distributor_churn': None,
+        'system_anomalies': None,
+        'active_bugs': None,
+        'active_rcas': None,
+        'product_metrics': None
+    }
 }
 
 def is_business_hours():
@@ -57,6 +82,85 @@ def should_refresh_daily():
     
     # Refresh once per day
     return (datetime.now() - last_refresh).days >= 1
+
+def should_refresh_tile(tile_name):
+    """Check if specific tile needs refresh based on tiered strategy"""
+    current_time = datetime.now()
+    
+    # Core AEPS tiles - Hourly refresh (9 AM - 9 PM)
+    core_aeps_tiles = ['2fa_success', 'transaction_success', 'gtv_performance', 'bank_error', 'platform_uptime']
+    
+    if tile_name in core_aeps_tiles:
+        # Only refresh during business hours
+        if not is_business_hours():
+            return False
+        
+        last_refresh = GLOBAL_CACHED_DATA['tile_refresh_times'].get(tile_name)
+        if not last_refresh:
+            return True
+        
+        # Refresh every hour during business hours
+        return (current_time - last_refresh).total_seconds() >= 3600
+    
+    # All other tiles - Daily refresh
+    else:
+        last_refresh = GLOBAL_CACHED_DATA['tile_refresh_times'].get(tile_name)
+        if not last_refresh:
+            return True
+        
+        # Refresh once per day
+        return (current_time - last_refresh).days >= 1
+
+def update_tile_refresh_time(tile_name):
+    """Update the last refresh time for a specific tile"""
+    GLOBAL_CACHED_DATA['tile_refresh_times'][tile_name] = datetime.now()
+
+def get_tile_refresh_status():
+    """Get refresh status for all tiles"""
+    status = {}
+    current_time = datetime.now()
+    
+    for tile_name, last_refresh in GLOBAL_CACHED_DATA['tile_refresh_times'].items():
+        if not last_refresh:
+            status[tile_name] = "Never refreshed"
+        else:
+            time_diff = current_time - last_refresh
+            if tile_name in ['2fa_success', 'transaction_success', 'gtv_performance', 'bank_error', 'platform_uptime']:
+                # Core AEPS - hourly
+                if time_diff.total_seconds() < 3600:
+                    status[tile_name] = f"Fresh ({time_diff.seconds//60} min ago)"
+                else:
+                    status[tile_name] = f"Stale ({time_diff.total_seconds()//3600} hours ago)"
+            else:
+                # Daily tiles
+                if time_diff.days < 1:
+                    status[tile_name] = f"Fresh ({time_diff.seconds//3600} hours ago)"
+                else:
+                    status[tile_name] = f"Stale ({time_diff.days} days ago)"
+    
+    return status
+
+def smart_cache_data(tile_name, ttl_hours=1):
+    """Smart cache decorator that respects tiered refresh strategy"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            # Check if tile needs refresh
+            if should_refresh_tile(tile_name):
+                # Clear cache for this function
+                func.cache_clear() if hasattr(func, 'cache_clear') else None
+                # Update refresh time
+                update_tile_refresh_time(tile_name)
+            
+            # Use standard cache with appropriate TTL
+            if tile_name in ['2fa_success', 'transaction_success', 'gtv_performance', 'bank_error', 'platform_uptime']:
+                # Core AEPS - 1 hour cache
+                return st.cache_data(ttl=3600)(func)(*args, **kwargs)
+            else:
+                # Daily tiles - 24 hour cache
+                return st.cache_data(ttl=86400)(func)(*args, **kwargs)
+        
+        return wrapper
+    return decorator
 
 # Google Cloud imports (for real data integration)
 from google.oauth2 import service_account
@@ -12638,6 +12742,10 @@ def main():
             # Clear all caches to force data refresh
             st.cache_data.clear()
             st.cache_resource.clear()
+            # Reset all tile refresh times
+            for tile_name in GLOBAL_CACHED_DATA['tile_refresh_times']:
+                GLOBAL_CACHED_DATA['tile_refresh_times'][tile_name] = None
+            st.success("✅ Data refreshed successfully!")
             st.rerun()
     
     with col2:
@@ -12648,6 +12756,31 @@ def main():
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
+    
+    # Tile Refresh Status Display
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🔄 Tile Refresh Status")
+    
+    refresh_status = get_tile_refresh_status()
+    
+    # Core AEPS tiles (Hourly)
+    st.sidebar.markdown("**🕐 Core AEPS (Hourly)**")
+    core_tiles = ['2fa_success', 'transaction_success', 'gtv_performance', 'bank_error', 'platform_uptime']
+    for tile in core_tiles:
+        status = refresh_status.get(tile, "Unknown")
+        color = "🟢" if "Fresh" in status else "🟡" if "Stale" in status else "🔴"
+        st.sidebar.markdown(f"{color} {tile.replace('_', ' ').title()}: {status}")
+    
+    # Daily tiles
+    st.sidebar.markdown("**📅 Daily Tiles**")
+    daily_tiles = [tile for tile in refresh_status.keys() if tile not in core_tiles]
+    for tile in daily_tiles[:5]:  # Show first 5 to avoid clutter
+        status = refresh_status.get(tile, "Unknown")
+        color = "🟢" if "Fresh" in status else "🟡" if "Stale" in status else "🔴"
+        st.sidebar.markdown(f"{color} {tile.replace('_', ' ').title()}: {status}")
+    
+    if len(daily_tiles) > 5:
+        st.sidebar.markdown(f"... and {len(daily_tiles) - 5} more tiles")
     
     # Data source selection
     data_mode = st.sidebar.selectbox("Data Source", ["Real Data", "Enhanced Dummy"], key="data_mode")
