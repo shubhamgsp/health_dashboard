@@ -10,11 +10,53 @@ import calendar
 import os
 import warnings
 from dotenv import load_dotenv
+import json
 
 # Load environment variables
 load_dotenv()
 
 warnings.filterwarnings('ignore')
+
+# Global data storage for cost optimization
+GLOBAL_CACHED_DATA = {
+    'core_aeps': None,
+    'daily_metrics': None,
+    'google_sheets': None,
+    'last_refresh': None,
+    'refresh_count': 0
+}
+
+def is_business_hours():
+    """Check if current time is between 9 AM - 9 PM"""
+    current_hour = datetime.now().hour
+    return 9 <= current_hour <= 21
+
+def should_refresh_core_aeps():
+    """Only refresh core AEPS during business hours"""
+    if not is_business_hours():
+        return False
+    
+    if not GLOBAL_CACHED_DATA['core_aeps']:
+        return True
+    
+    last_refresh = GLOBAL_CACHED_DATA['last_refresh']
+    if not last_refresh:
+        return True
+    
+    # Refresh every hour during business hours
+    return (datetime.now() - last_refresh).seconds >= 3600
+
+def should_refresh_daily():
+    """Check if daily data needs refresh"""
+    if not GLOBAL_CACHED_DATA['daily_metrics']:
+        return True
+    
+    last_refresh = GLOBAL_CACHED_DATA['last_refresh']
+    if not last_refresh:
+        return True
+    
+    # Refresh once per day
+    return (datetime.now() - last_refresh).days >= 1
 
 # Google Cloud imports (for real data integration)
 from google.oauth2 import service_account
@@ -1175,7 +1217,7 @@ def get_priority_distributor_churn_data():
         st.error(f"❌ Error fetching priority distributor churn data: {str(e)}")
         return None
 
-@st.cache_data(ttl=60)  # Cache for 1 minute - reduced for debugging
+@st.cache_data(ttl=3600)  # Cache for 1 hour - cost optimization
 def get_rfm_fraud_data():
     """Fetch RFM fraud detection metrics from BigQuery with caching"""
     try:
@@ -1679,7 +1721,7 @@ def get_stable_users_analytics():
         st.error(f"Error fetching stable users analytics: {str(e)}")
         return None, None
 
-@st.cache_data(ttl=1800)  # Cache for 30 minutes
+@st.cache_data(ttl=3600)  # Cache for 1 hour - cost optimization
 def get_anomaly_data_from_sheets():
     """Fetch anomaly detection data from Google Sheets using pygsheets"""
     try:
@@ -2064,7 +2106,7 @@ def process_anomaly_data(df):
     return processed_data
 
 # Churn Analytics Functions (from churn_analysis_app.py)
-@st.cache_data(ttl=1800)  # Cache for 30 minutes
+@st.cache_data(ttl=3600)  # Cache for 1 hour - cost optimization
 def get_churn_data():
     """Fetch churn data from the correct table"""
     try:
@@ -2078,6 +2120,8 @@ def get_churn_data():
         query = f"""
         SELECT *
         FROM {churn_table}
+        ORDER BY date DESC
+        LIMIT 1000
         """
         
         df = client.query(query).result().to_dataframe()
@@ -2170,7 +2214,7 @@ def style_table(df: pd.DataFrame, bg_color: str = "#f3f6ff", hide_index: bool = 
     ])
     return sty
 
-@st.cache_data(ttl=1800)  # Cache for 30 minutes
+@st.cache_data(ttl=3600)  # Cache for 1 hour - cost optimization
 def get_m2d_cash_support_data():
     """Fetch M2D cash support data"""
     try:
@@ -2198,7 +2242,7 @@ def get_m2d_cash_support_data():
         st.error(f"Error fetching M2D data: {str(e)}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes to ensure fresh data
+@st.cache_data(ttl=3600)  # Cache for 1 hour - cost optimization
 def get_m2b_pendency_data():
     """Fetch M2B pendency data with time bucket analysis from BigQuery"""
     try:
@@ -2258,7 +2302,7 @@ def get_m2b_pendency_data():
         st.warning(f"⚠️ Error fetching M2B data: {str(e)}")
         return create_sample_m2b_data()
 
-@st.cache_data(ttl=1800)  # Cache for 30 minutes
+@st.cache_data(ttl=3600)  # Cache for 1 hour - cost optimization
 def get_mcc_cash_support_data():
     """Fetch MCC cash support data"""
     try:
@@ -2459,7 +2503,7 @@ def generate_churn_fallback_data():
     return pd.DataFrame(data)
 
 # Real data fetching function
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data(ttl=3600)  # Cache for 1 hour - cost optimization
 def get_real_bigquery_data(query_name, selected_date, _client):
     """Fetch real data from BigQuery using secure dashboard implementation with proper median calculations"""
     
@@ -5938,7 +5982,7 @@ def get_bugs_dataframe_from_sheets():
         # Silent failure - will fallback to CSV
         return None
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data(ttl=3600)  # Cache for 1 hour - cost optimization
 def get_bugs_data_from_csv():
     """
     Fetch bugs data from CSV file
@@ -5999,7 +6043,7 @@ def get_bugs_data_from_csv():
         st.error(f"❌ Error loading bugs data from CSV: {str(e)}")
         return get_sample_bugs_data()
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data(ttl=3600)  # Cache for 1 hour - cost optimization
 def get_bugs_data_from_sheets():
     """
     Fetch bugs data from Google Sheets using pygsheets
@@ -6091,7 +6135,7 @@ def get_sample_bugs_data():
 
 # ==================== PRODUCT METRICS & TRENDS ====================
 
-@st.cache_data(ttl=600)  # Cache for 10 minutes
+@st.cache_data(ttl=3600)  # Cache for 1 hour - cost optimization
 def get_product_metrics_data():
     """
     Fetch product-wise long-term metrics from Google Sheets
