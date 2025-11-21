@@ -1149,8 +1149,18 @@ def get_bigquery_client():
         # Try loading from Streamlit secrets first (for Streamlit Cloud deployment)
         try:
             if "gcp_service_account" in st.secrets:
+                # Convert secrets to dict and handle private key formatting
+                service_account_info = dict(st.secrets["gcp_service_account"])
+                
+                # Ensure private_key has proper newline characters
+                if "private_key" in service_account_info:
+                    # Replace literal \n with actual newlines if needed
+                    private_key = service_account_info["private_key"]
+                    if "\\n" in private_key:
+                        service_account_info["private_key"] = private_key.replace("\\n", "\n")
+                
                 credentials = service_account.Credentials.from_service_account_info(
-                    st.secrets["gcp_service_account"],
+                    service_account_info,
                     scopes=scope
                 )
                 project_id = st.secrets["gcp_service_account"]["project_id"]
@@ -1160,11 +1170,12 @@ def get_bigquery_client():
                     project=project_id
                 )
                 
-                # st.success(f"✅ Connected to BigQuery (Streamlit Cloud): {project_id}")
+                st.success(f"✅ Connected to BigQuery (Streamlit Cloud): {project_id}")
                 return client
         except Exception as e:
-            # If secrets not found, continue to file-based loading
-            pass
+            # Show the actual error for debugging
+            st.error(f"❌ Error loading from Streamlit secrets: {str(e)}")
+            st.info("💡 Trying file-based credentials...")
         
         # Fallback to file-based credentials (for local development)
         credentials_file = os.getenv("BIGQUERY_CREDENTIALS_FILE", "spicemoney-dwh.json")
@@ -3031,7 +3042,7 @@ def get_real_bigquery_data(query_name, selected_date, _client):
             REQUEST_ID, 
             DPID, 
             RDSID
-          FROM ds_striim.T_AEPSR_TRANS_DEVICE_DETAILS
+          FROM {get_table_ref(os.getenv('BIGQUERY_DATASET_DS', 'ds_striim'), os.getenv('AEPSR_TRANS_DEVICE_DETAILS_TABLE', 'T_AEPSR_TRANS_DEVICE_DETAILS'))}
           WHERE DATE(op_time) BETWEEN last_7_days_start AND today
         ),
         combined_data AS (
