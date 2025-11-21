@@ -4165,48 +4165,50 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
         # if len(transaction_df) > 0:
         #     st.info(f"📊 Sample data: {transaction_df.head(1).to_dict('records')}")
         
-            # Check if required columns exist and get the latest (current) values
-            if 'overall_success_rate' not in transaction_df.columns:
-                # st.error("❌ Missing 'overall_success_rate' column in transaction data")
-                current_success = 0
-            else:
-                # Get the most recent hour's success rate from today's data (not null values)
-                today_data = transaction_df[transaction_df['overall_success_rate'].notna()].copy()
-                if not today_data.empty:
-                    latest_data = today_data.sort_values('hour').tail(1)
-                    try:
-                        current_success = float(latest_data['overall_success_rate'].iloc[0])
-                        if pd.isna(current_success):
-                            current_success = 0
-                    except (ValueError, TypeError):
+        # Check if required columns exist and get the latest (current) values
+        latest_data = pd.DataFrame()  # Initialize to avoid reference errors
+        
+        if 'overall_success_rate' not in transaction_df.columns:
+            # st.error("❌ Missing 'overall_success_rate' column in transaction data")
+            current_success = 0
+        else:
+            # Get the most recent hour's success rate from today's data (not null values)
+            today_data = transaction_df[transaction_df['overall_success_rate'].notna()].copy()
+            if not today_data.empty:
+                latest_data = today_data.sort_values('hour').tail(1)
+                try:
+                    current_success = float(latest_data['overall_success_rate'].iloc[0])
+                    if pd.isna(current_success):
                         current_success = 0
-                else:
-                    latest_data = transaction_df.sort_values('hour').tail(1)
+                except (ValueError, TypeError):
                     current_success = 0
-                # st.success(f"✅ Current success rate: {current_success:.2f}%")
-            
-            if 'median_success_rate' not in transaction_df.columns:
-                # st.warning("⚠️ Missing 'median_success_rate' column, using current as fallback")
-                median_success = current_success
             else:
-                # Get median from the latest hour
-                if not latest_data.empty:
-                    try:
-                        # Try multiple possible column names for median
-                        median_success = None
-                        for col in ['median_success_rate', 'avg_success_rate', 'median_fa2_succ_rate']:
-                            if col in latest_data.columns:
-                                median_success = float(latest_data[col].iloc[0])
-                                break
-                        if median_success is None:
-                            median_success = current_success
-                        if pd.isna(median_success):
-                            median_success = current_success
-                    except (ValueError, TypeError):
+                latest_data = transaction_df.sort_values('hour').tail(1)
+                current_success = 0
+            # st.success(f"✅ Current success rate: {current_success:.2f}%")
+        
+        if 'median_success_rate' not in transaction_df.columns:
+            # st.warning("⚠️ Missing 'median_success_rate' column, using current as fallback")
+            median_success = current_success
+        else:
+            # Get median from the latest hour
+            if not latest_data.empty:
+                try:
+                    # Try multiple possible column names for median
+                    median_success = None
+                    for col in ['median_success_rate', 'avg_success_rate', 'median_fa2_succ_rate']:
+                        if col in latest_data.columns:
+                            median_success = float(latest_data[col].iloc[0])
+                            break
+                    if median_success is None:
                         median_success = current_success
-                else:
+                    if pd.isna(median_success):
+                        median_success = current_success
+                except (ValueError, TypeError):
                     median_success = current_success
-                # st.success(f"✅ Median success rate: {median_success:.2f}%")
+            else:
+                median_success = current_success
+            # st.success(f"✅ Median success rate: {median_success:.2f}%")
         
         # Calculate standard deviation for dynamic thresholds
         try:
