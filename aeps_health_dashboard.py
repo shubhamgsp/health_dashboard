@@ -17,44 +17,82 @@ load_dotenv()
 
 warnings.filterwarnings('ignore')
 
-# Global data storage for cost optimization
+# Import AI libraries (with fallback if not available)
+try:
+    import openai
+    AI_OPENAI_AVAILABLE = True
+except ImportError:
+    AI_OPENAI_AVAILABLE = False
+    print("⚠️ OpenAI library not found. AI recommendations will be limited.")
+
+try:
+    import anthropic
+    AI_ANTHROPIC_AVAILABLE = True
+except ImportError:
+    AI_ANTHROPIC_AVAILABLE = False
+    print("⚠️ Anthropic library not found. AI recommendations will be limited.")
+
+# Import Redis caching (with fallback if not available)
+try:
+    from redis_cache import init_shared_cache, get_shared_cache, cached_query_hourly, cached_query_daily
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+    print("⚠️ Redis cache module not found. Using standard Streamlit caching.")
+
+# Initialize session state for persistent cache tracking across browser refreshes
+def init_cache_data():
+    """Initialize cache data in session state for persistence across browser refreshes"""
+    if 'tile_refresh_times' not in st.session_state:
+        st.session_state.tile_refresh_times = {
+            # Core AEPS - Hourly refresh (9 AM - 9 PM)
+            '2fa_success': None,
+            'transaction_success': None,
+            'gtv_performance': None,
+            'bank_error': None,
+            'platform_uptime': None,
+            # Daily refresh tiles
+            'cash_product': None,
+            'login_success': None,
+            'm2b_pendency': None,
+            'cc_calls': None,
+            'bot_analytics': None,
+            'rfm_score': None,
+            'new_users': None,
+            'churn_rate': None,
+            'stable_users': None,
+            'winback_conversion': None,
+            'sales_iteration': None,
+            'distributor_churn': None,
+            'system_anomalies': None,
+            'active_bugs': None,
+            'active_rcas': None,
+            'product_metrics': None
+        }
+    if 'last_refresh' not in st.session_state:
+        st.session_state.last_refresh = None
+    if 'refresh_count' not in st.session_state:
+        st.session_state.refresh_count = 0
+
+# Global data storage for cost optimization (legacy - now using session_state)
 GLOBAL_CACHED_DATA = {
     'core_aeps': None,
     'daily_metrics': None,
     'google_sheets': None,
     'last_refresh': None,
     'refresh_count': 0,
-    'tile_refresh_times': {
-        # Core AEPS - Hourly refresh (9 AM - 9 PM)
-        '2fa_success': None,
-        'transaction_success': None,
-        'gtv_performance': None,
-        'bank_error': None,
-        'platform_uptime': None,
-        # Daily refresh tiles
-        'cash_product': None,
-        'login_success': None,
-        'm2b_pendency': None,
-        'cc_calls': None,
-        'bot_analytics': None,
-        'rfm_score': None,
-        'new_users': None,
-        'churn_rate': None,
-        'stable_users': None,
-        'winback_conversion': None,
-        'sales_iteration': None,
-        'distributor_churn': None,
-        'system_anomalies': None,
-        'active_bugs': None,
-        'active_rcas': None,
-        'product_metrics': None
-    }
+    'tile_refresh_times': {}
 }
 
 def is_business_hours():
-    """Check if current time is between 9 AM - 9 PM"""
+    """Check if current time is between 9 AM - 6 PM"""
     current_hour = datetime.now().hour
-    return 9 <= current_hour <= 21
+    return 9 <= current_hour <= 18
+
+def is_fixed_refresh_time():
+    """Check if current time is at a fixed refresh time (8:59AM for daily, 9:59AM-5:59PM for Core AEPS)"""
+    current_time = datetime.now()
+    return current_time.minute == 59 and (current_time.hour == 8 or 9 <= current_time.hour <= 18)
 
 def should_refresh_core_aeps():
     """Only refresh core AEPS during business hours"""
@@ -84,43 +122,74 @@ def should_refresh_daily():
     return (datetime.now() - last_refresh).days >= 1
 
 def should_refresh_tile(tile_name):
-    """Check if specific tile needs refresh based on tiered strategy"""
+    """Check if specific tile needs refresh based on tiered strategy with fixed hourly times"""
+    # Initialize cache data if needed
+    init_cache_data()
+    
     current_time = datetime.now()
     
-    # Core AEPS tiles - Hourly refresh (9 AM - 9 PM)
+    # Core AEPS tiles - Fixed hourly refresh (9:59AM, 10:59AM, 11:59AM, etc.)
     core_aeps_tiles = ['2fa_success', 'transaction_success', 'gtv_performance', 'bank_error', 'platform_uptime']
     
     if tile_name in core_aeps_tiles:
-        # Only refresh during business hours
-        if not is_business_hours():
+        # Check if current time matches fixed refresh times (9:59AM, 10:59AM, etc.)
+        current_minute = current_time.minute
+        current_hour = current_time.hour
+        
+        # Only refresh at 59 minutes past the hour (9:59, 10:59, 11:59, etc.)
+        if current_minute != 59:
             return False
         
-        last_refresh = GLOBAL_CACHED_DATA['tile_refresh_times'].get(tile_name)
+        # Only refresh during business hours (9 AM - 6 PM)
+        if not (9 <= current_hour <= 18):
+            return False
+        
+        last_refresh = st.session_state.tile_refresh_times.get(tile_name)
         if not last_refresh:
             return True
         
-        # Refresh every hour during business hours
-        return (current_time - last_refresh).total_seconds() >= 3600
+        # Check if we already refreshed at this exact hour
+        if last_refresh.hour == current_hour and last_refresh.minute >= 59:
+            return False
+        
+        # Refresh at fixed times
+        return True
     
-    # All other tiles - Daily refresh
+    # All other tiles - Daily refresh at 8:59 AM
     else:
-        last_refresh = GLOBAL_CACHED_DATA['tile_refresh_times'].get(tile_name)
-        if not last_refresh:
-            return True
+        # Check if current time is 8:59 AM
+        current_minute = current_time.minute
+        current_hour = current_time.hour
         
-        # Refresh once per day
-        return (current_time - last_refresh).days >= 1
+        # Only refresh daily tiles at 8:59 AM
+        if current_hour == 8 and current_minute == 59:
+            last_refresh = st.session_state.tile_refresh_times.get(tile_name)
+            if not last_refresh:
+                return True
+            
+            # Check if we already refreshed today at 8:59 AM
+            if last_refresh.hour == 8 and last_refresh.minute >= 59 and last_refresh.date() == current_time.date():
+                return False
+            
+            return True
+        else:
+            # No refresh outside of 8:59 AM
+            return False
 
 def update_tile_refresh_time(tile_name):
     """Update the last refresh time for a specific tile"""
-    GLOBAL_CACHED_DATA['tile_refresh_times'][tile_name] = datetime.now()
+    init_cache_data()
+    st.session_state.tile_refresh_times[tile_name] = datetime.now()
+    st.session_state.last_refresh = datetime.now()
+    st.session_state.refresh_count += 1
 
 def get_tile_refresh_status():
     """Get refresh status for all tiles"""
+    init_cache_data()
     status = {}
     current_time = datetime.now()
     
-    for tile_name, last_refresh in GLOBAL_CACHED_DATA['tile_refresh_times'].items():
+    for tile_name, last_refresh in st.session_state.tile_refresh_times.items():
         if not last_refresh:
             status[tile_name] = "Never refreshed"
         else:
@@ -130,7 +199,7 @@ def get_tile_refresh_status():
                 if time_diff.total_seconds() < 3600:
                     status[tile_name] = f"Fresh ({time_diff.seconds//60} min ago)"
                 else:
-                    status[tile_name] = f"Stale ({time_diff.total_seconds()//3600} hours ago)"
+                    status[tile_name] = f"Stale ({time_diff.total_seconds()//3600:.0f} hours ago)"
             else:
                 # Daily tiles
                 if time_diff.days < 1:
@@ -140,24 +209,42 @@ def get_tile_refresh_status():
     
     return status
 
-def smart_cache_data(tile_name, ttl_hours=1):
-    """Smart cache decorator that respects tiered refresh strategy"""
+def smart_cache_data(tile_name):
+    """Custom cache decorator that truly respects tiered refresh strategy"""
     def decorator(func):
         def wrapper(*args, **kwargs):
-            # Check if tile needs refresh
-            if should_refresh_tile(tile_name):
-                # Clear cache for this function
-                func.cache_clear() if hasattr(func, 'cache_clear') else None
-                # Update refresh time
-                update_tile_refresh_time(tile_name)
+            init_cache_data()
             
-            # Use standard cache with appropriate TTL
-            if tile_name in ['2fa_success', 'transaction_success', 'gtv_performance', 'bank_error', 'platform_uptime']:
-                # Core AEPS - 1 hour cache
-                return st.cache_data(ttl=3600)(func)(*args, **kwargs)
-            else:
-                # Daily tiles - 24 hour cache
-                return st.cache_data(ttl=86400)(func)(*args, **kwargs)
+            # Create unique cache key for this function
+            cache_key = f"{func.__name__}_{tile_name}"
+            
+            # Check if we have cached data
+            if cache_key not in st.session_state:
+                st.session_state[cache_key] = None
+            
+            # Check if tile needs refresh
+            needs_refresh = should_refresh_tile(tile_name)
+            
+            # If we have cached data and don't need refresh, return cached data
+            if st.session_state[cache_key] is not None and not needs_refresh:
+                # Show cache hit message
+                last_refresh = st.session_state.tile_refresh_times.get(tile_name)
+                # if last_refresh:
+                #     time_since = (datetime.now() - last_refresh).seconds // 60
+                #     st.success(f"💾 Using cached data for {tile_name.replace('_', ' ').title()} (refreshed {time_since} min ago) - Query skipped!")
+                return st.session_state[cache_key]
+            
+            # Otherwise, fetch fresh data
+            # st.warning(f"🔄 Fetching fresh data for {tile_name.replace('_', ' ').title()}...")
+            result = func(*args, **kwargs)
+            
+            # Cache the result
+            st.session_state[cache_key] = result
+            
+            # Update refresh time
+            update_tile_refresh_time(tile_name)
+            
+            return result
         
         return wrapper
     return decorator
@@ -368,7 +455,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Bank Error Analysis Functions
-@st.cache_data(show_spinner=True, ttl=300)
+@smart_cache_data('bank_error')
 def load_bank_error_data(_client: bigquery.Client) -> pd.DataFrame:
     """Load bank error analysis data"""
     query = f"""
@@ -485,6 +572,240 @@ def load_bank_error_data(_client: bigquery.Client) -> pd.DataFrame:
     """
     return _client.query(query).result().to_dataframe()
 
+# ============================================================================
+# AI-POWERED RECOMMENDATION ENGINE
+# ============================================================================
+
+def get_ai_client():
+    """Initialize and return AI client (OpenAI or Anthropic)"""
+    # Try OpenAI first
+    if AI_OPENAI_AVAILABLE:
+        api_key = os.getenv('OPENAI_API_KEY')
+        if api_key:
+            openai.api_key = api_key
+            return 'openai'
+    
+    # Fall back to Anthropic
+    if AI_ANTHROPIC_AVAILABLE:
+        api_key = os.getenv('ANTHROPIC_API_KEY')
+        if api_key:
+            return 'anthropic'
+    
+    return None
+
+def generate_ai_recommendations(
+    context_data: dict,
+    recommendation_type: str = "general",
+    max_recommendations: int = 5
+) -> list:
+    """
+    Generate AI-powered recommendations based on context data
+    
+    Args:
+        context_data: Dictionary containing metrics, trends, and analysis data
+        recommendation_type: Type of recommendations (bank_error, fraud, churn, etc.)
+        max_recommendations: Maximum number of recommendations to generate
+    
+    Returns:
+        List of AI-generated recommendations (strings or dicts)
+    """
+    ai_client = get_ai_client()
+    
+    if not ai_client:
+        return []
+    
+    try:
+        # Build context prompt
+        context_str = json.dumps(context_data, indent=2, default=str)
+        
+        # Customize prompt based on recommendation type
+        prompts = {
+            "bank_error": f"""You are an expert in banking operations and payment systems. Analyze the following bank error data and provide {max_recommendations} specific, actionable recommendations to reduce errors and improve transaction success rates.
+
+Context Data:
+{context_str}
+
+Provide recommendations in this format:
+[Priority Level] **Category**: Brief description - Specific action to take
+
+Focus on:
+- Root cause analysis of error patterns
+- Technical improvements
+- Business process optimizations
+- Customer experience enhancements
+- Preventive measures
+
+Be specific, actionable, and prioritize by impact.""",
+
+            "fraud": f"""You are an expert in fraud detection and prevention. Analyze the following fraud analysis data and provide {max_recommendations} specific, actionable recommendations to improve fraud detection and reduce financial losses.
+
+Context Data:
+{context_str}
+
+Provide recommendations in this format:
+[Priority Level] **Category**: Brief description - Specific action to take
+
+Focus on:
+- Fraud pattern analysis
+- Detection algorithm improvements
+- Risk mitigation strategies
+- Channel-specific vulnerabilities
+- Prevention mechanisms
+
+Be specific, actionable, and prioritize by financial impact.""",
+
+            "churn": f"""You are an expert in customer retention and churn analysis. Analyze the following churn data and provide {max_recommendations} specific, actionable recommendations to reduce churn and improve retention.
+
+Context Data:
+{context_str}
+
+Provide recommendations as JSON array with this structure:
+[
+  {{
+    "priority": "CRITICAL/HIGH/MEDIUM/LOW",
+    "title": "emoji Title",
+    "description": "Brief description of the issue",
+    "action": "Specific action steps to take"
+  }}
+]
+
+Focus on:
+- Root cause identification
+- Retention strategies
+- Personalized interventions
+- Process improvements
+- Proactive monitoring
+
+Be specific, actionable, and prioritize by business impact.""",
+
+            "performance": f"""You are an expert in system performance and operational efficiency. Analyze the following performance data and provide {max_recommendations} specific, actionable recommendations to improve performance and reliability.
+
+Context Data:
+{context_str}
+
+Provide recommendations in this format:
+[Priority Level] **Category**: Brief description - Specific action to take
+
+Focus on:
+- Performance bottlenecks
+- System optimization
+- Resource allocation
+- Scalability improvements
+- Monitoring enhancements
+
+Be specific, actionable, and prioritize by operational impact.""",
+
+            "general": f"""You are a data analytics expert. Analyze the following data and provide {max_recommendations} specific, actionable recommendations for improvement.
+
+Context Data:
+{context_str}
+
+Provide recommendations in this format:
+[Priority Level] **Category**: Brief description - Specific action to take
+
+Be specific, actionable, and prioritize by impact."""
+        }
+        
+        prompt = prompts.get(recommendation_type, prompts["general"])
+        
+        # Generate recommendations using available AI
+        if ai_client == 'openai':
+            response = openai.chat.completions.create(
+                model=os.getenv('OPENAI_MODEL', 'gpt-4o-mini'),
+                messages=[
+                    {"role": "system", "content": "You are an expert business analyst providing actionable recommendations."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=1500
+            )
+            recommendations_text = response.choices[0].message.content
+            
+        elif ai_client == 'anthropic':
+            client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
+            response = client.messages.create(
+                model=os.getenv('ANTHROPIC_MODEL', 'claude-3-5-sonnet-20241022'),
+                max_tokens=1500,
+                temperature=0.7,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            recommendations_text = response.content[0].text
+        
+        # Parse recommendations
+        if recommendation_type == "churn":
+            # Try to parse as JSON for structured recommendations
+            try:
+                # Extract JSON from response
+                json_start = recommendations_text.find('[')
+                json_end = recommendations_text.rfind(']') + 1
+                if json_start != -1 and json_end > json_start:
+                    json_str = recommendations_text[json_start:json_end]
+                    recommendations = json.loads(json_str)
+                    return recommendations[:max_recommendations]
+            except:
+                pass
+        
+        # Parse as text recommendations
+        recommendations = []
+        lines = recommendations_text.strip().split('\n')
+        for line in lines:
+            line = line.strip()
+            if line and (line[0].isdigit() or line.startswith('-') or line.startswith('•') or '[' in line):
+                # Clean up numbering and bullets
+                line = line.lstrip('0123456789.-•) ')
+                if len(line) > 10:  # Minimum length for valid recommendation
+                    recommendations.append(line)
+        
+        return recommendations[:max_recommendations]
+        
+    except Exception as e:
+        print(f"⚠️ AI recommendation generation failed: {str(e)}")
+        return []
+
+def enhance_recommendations_with_ai(
+    rule_based_recommendations: list,
+    context_data: dict,
+    recommendation_type: str = "general"
+) -> list:
+    """
+    Enhance rule-based recommendations with AI insights
+    
+    Args:
+        rule_based_recommendations: Existing rule-based recommendations
+        context_data: Context data for AI analysis
+        recommendation_type: Type of recommendations
+    
+    Returns:
+        Combined list of rule-based and AI recommendations
+    """
+    # Start with rule-based recommendations
+    all_recommendations = rule_based_recommendations.copy()
+    
+    # Add AI recommendations
+    ai_recs = generate_ai_recommendations(
+        context_data=context_data,
+        recommendation_type=recommendation_type,
+        max_recommendations=3  # Add a few AI recommendations
+    )
+    
+    if ai_recs:
+        # Add separator for AI recommendations
+        if isinstance(rule_based_recommendations[0] if rule_based_recommendations else "", str):
+            all_recommendations.append("---")
+            all_recommendations.append("🤖 **AI-Powered Insights**:")
+            all_recommendations.extend(ai_recs)
+        else:
+            # For structured recommendations (dicts)
+            all_recommendations.extend(ai_recs)
+    
+    return all_recommendations
+
+# ============================================================================
+# END AI-POWERED RECOMMENDATION ENGINE
+# ============================================================================
+
 def generate_bank_insights(df: pd.DataFrame) -> dict:
     """Generate key insights for bank error analysis"""
     insights = {}
@@ -584,6 +905,32 @@ def generate_bank_insights(df: pd.DataFrame) -> dict:
     if error_rate > 0.02:
         recommendations.append("👥 **Customer Experience**: Error rate impacting users - implement user-friendly error messages and recovery flows")
     
+    # Enhance with AI-powered recommendations
+    ai_context = {
+        "total_alerts": total_alerts,
+        "total_errors": total_errors,
+        "total_transactions": total_transactions,
+        "error_rate": f"{error_rate*100:.2f}%",
+        "top_bank": top_bank,
+        "top_error": top_error,
+        "last_month_alerts": last_month_alerts,
+        "three_month_alerts": three_month_alerts,
+        "error_patterns": {
+            "insufficient_funds": error_messages_lower.str.contains("insufficient", na=False).sum(),
+            "timeouts": error_messages_lower.str.contains("timeout", na=False).sum(),
+            "network_issues": error_messages_lower.str.contains("network", na=False).sum(),
+            "invalid_data": error_messages_lower.str.contains("invalid", na=False).sum(),
+            "declined": error_messages_lower.str.contains("declined", na=False).sum(),
+            "server_errors": error_messages_lower.str.contains("server", na=False).sum()
+        }
+    }
+    
+    recommendations = enhance_recommendations_with_ai(
+        rule_based_recommendations=recommendations,
+        context_data=ai_context,
+        recommendation_type="bank_error"
+    )
+    
     insights = {
         "total_alerts": total_alerts,
         "total_errors": total_errors,
@@ -603,6 +950,7 @@ def show_bank_error_dashboard():
     # Back button
     if st.button("← Back to Main Dashboard", key="back_to_main_bank_error"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
     
     # Load data
@@ -639,7 +987,7 @@ def show_bank_error_dashboard():
         
         # Enhanced Actionable Recommendations
         if insights["recommendations"]:
-            st.success("### 💡 Smart Recommendations & Action Items")
+            st.success("### 🤖 AI-Powered Recommendations")
             
             # Categorize recommendations by priority
             critical_recs = [rec for rec in insights["recommendations"] if "🚨" in rec or "CRITICAL" in rec]
@@ -812,7 +1160,7 @@ def get_bigquery_client():
                     project=project_id
                 )
                 
-                st.success(f"✅ Connected to BigQuery (Streamlit Cloud): {project_id}")
+                # st.success(f"✅ Connected to BigQuery (Streamlit Cloud): {project_id}")
                 return client
         except Exception as e:
             # If secrets not found, continue to file-based loading
@@ -844,7 +1192,7 @@ def get_bigquery_client():
                 project=project_id
             )
             
-            st.success(f"✅ Connected to BigQuery (Local): {project_id}")
+            # st.success(f"✅ Connected to BigQuery (Local): {project_id}")
             return client
         else:
             st.warning("🔄 BigQuery credentials not found. Using enhanced dummy data.")
@@ -1077,17 +1425,17 @@ def show_sample_bank_analysis():
     fig_banks.update_layout(height=500)
     st.plotly_chart(fig_banks, use_container_width=True)
 
-@st.cache_data(ttl=3600)  # Cache for 1 hour - static until refresh
+@smart_cache_data('distributor_churn')
 def get_distributor_churn_data():
     """Fetch distributor-level churn analysis from BigQuery with caching"""
     try:
         client = get_bigquery_client()
         if not client:
-            st.warning("⚠️ Distributor Churn: No BigQuery client available")
+            # st.warning("⚠️ Distributor Churn: No BigQuery client available")
             return None
             
         distributor_churn_query = f"""
-        DECLARE s_date DATE DEFAULT DATE '2023-08-01';
+        DECLARE s_date DATE DEFAULT CURRENT_DATE();
 
         WITH month_list AS (
         SELECT DATE_TRUNC(DATE_SUB(s_date, INTERVAL 1 MONTH), MONTH) AS month_start, 'LM1' AS label
@@ -1264,7 +1612,7 @@ def get_distributor_churn_data():
         df = client.query(distributor_churn_query).to_dataframe()
         
         if df.empty:
-            st.warning("⚠️ No distributor churn data available")
+            # st.warning("⚠️ No distributor churn data available")
             return None
             
         return df
@@ -1273,13 +1621,13 @@ def get_distributor_churn_data():
         st.error(f"❌ Error fetching distributor churn data: {str(e)}")
         return None
 
-@st.cache_data(ttl=3600)  # Cache for 1 hour - static until refresh
+@smart_cache_data('distributor_churn')
 def get_priority_distributor_churn_data():
     """Fetch priority-based distributor churn analysis from BigQuery with caching"""
     try:
         client = get_bigquery_client()
         if not client:
-            st.warning("⚠️ Priority Distributor Churn: No BigQuery client available")
+            # st.warning("⚠️ Priority Distributor Churn: No BigQuery client available")
             return None
             
         # Get table reference
@@ -1303,7 +1651,7 @@ def get_priority_distributor_churn_data():
         df = client.query(priority_churn_query).to_dataframe()
         
         if df.empty:
-            st.warning("⚠️ No priority distributor churn data available")
+            # st.warning("⚠️ No priority distributor churn data available")
             return None
             
         # Convert data types for better analysis
@@ -1314,7 +1662,7 @@ def get_priority_distributor_churn_data():
         if 'smas_affected' in df.columns:
             df['smas_affected'] = pd.to_numeric(df['smas_affected'], errors='coerce')
             
-        st.success(f"✅ Priority Distributor Churn Data: {len(df)} records loaded")
+        # st.success(f"✅ Priority Distributor Churn Data: {len(df)} records loaded")
         return df
         
     except Exception as e:
@@ -1327,7 +1675,7 @@ def get_rfm_fraud_data():
     try:
         client = get_bigquery_client()
         if not client:
-            st.warning("⚠️ RFM: No BigQuery client available")
+            # st.warning("⚠️ RFM: No BigQuery client available")
             return None
             
         # Get table references
@@ -1831,14 +2179,14 @@ def get_anomaly_data_from_sheets():
     try:
         # Check if pygsheets is available
         if pygsheets is None:
-            st.warning("⚠️ pygsheets library not installed. Using sample data.")
-            st.info("💡 Install with: pip install pygsheets")
+            # st.warning("⚠️ pygsheets library not installed. Using sample data.")
+            # st.info("💡 Install with: pip install pygsheets")
             return get_sample_anomaly_data()
         
         # Get Google Sheets client (works with both Streamlit Cloud secrets and local file)
         gc = get_google_sheets_client()
         if gc is None:
-            st.warning("⚠️ Google Sheets credentials not found. Using sample data.")
+            # st.warning("⚠️ Google Sheets credentials not found. Using sample data.")
             return get_sample_anomaly_data()
         
         # Use pygsheets to access the spreadsheet (matching your working code)
@@ -2210,7 +2558,7 @@ def process_anomaly_data(df):
     return processed_data
 
 # Churn Analytics Functions (from churn_analysis_app.py)
-@st.cache_data(ttl=3600)  # Cache for 1 hour - cost optimization
+@smart_cache_data('churn_rate')
 def get_churn_data():
     """Fetch churn data from the correct table"""
     try:
@@ -2224,7 +2572,6 @@ def get_churn_data():
         query = f"""
         SELECT *
         FROM {churn_table}
-        ORDER BY date DESC
         LIMIT 1000
         """
         
@@ -2440,7 +2787,7 @@ def process_churn_data():
         client = get_bigquery_client()
         
         if client is None:
-            st.warning("⚠️ BigQuery connection failed. Using fallback mode with sample data.")
+            # st.warning("⚠️ BigQuery connection failed. Using fallback mode with sample data.")
             return generate_churn_fallback_data()
         
         with st.spinner("🔄 Loading churn data from BigQuery..."):
@@ -2605,6 +2952,23 @@ def generate_churn_fallback_data():
             })
     
     return pd.DataFrame(data)
+
+# Batch query optimization function
+@st.cache_data(ttl=3600)  # Cache for 1 hour - cost optimization
+def batch_fetch_bigquery_data(query_names, selected_date, _client):
+    """Fetch multiple queries in batch to reduce overhead and optimize database calls"""
+    if not _client:
+        return {name: None for name in query_names}
+    
+    results = {}
+    for query_name in query_names:
+        try:
+            results[query_name] = get_real_bigquery_data(query_name, selected_date, _client)
+        except Exception as e:
+            st.warning(f"⚠️ Error fetching {query_name}: {str(e)}")
+            results[query_name] = None
+    
+    return results
 
 # Real data fetching function
 @st.cache_data(ttl=3600)  # Cache for 1 hour - cost optimization
@@ -2922,7 +3286,7 @@ def get_real_bigquery_data(query_name, selected_date, _client):
         # Execute the appropriate query
         query = queries.get(query_name)
         if not query:
-            st.error(f"Unknown query: {query_name}")
+            # st.error(f"Unknown query: {query_name}")
             return None
         
         # Execute query
@@ -2944,10 +3308,10 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
     # Real data metrics from BigQuery
     if not transaction_df.empty:
         # Debug: Show what columns we actually have
-        st.info(f"📊 Transaction DataFrame columns: {list(transaction_df.columns)}")
-        st.info(f"📊 Transaction DataFrame shape: {transaction_df.shape}")
-        if len(transaction_df) > 0:
-            st.info(f"📊 Sample data: {transaction_df.head(1).to_dict('records')}")
+        # st.info(f"📊 Transaction DataFrame columns: {list(transaction_df.columns)}")
+        # st.info(f"📊 Transaction DataFrame shape: {transaction_df.shape}")
+        # if len(transaction_df) > 0:
+        #     st.info(f"📊 Sample data: {transaction_df.head(1).to_dict('records')}")
         
         # Transaction success metrics with aggregator breakdown
         current_success = transaction_df['overall_success_rate'].mean()
@@ -3046,24 +3410,24 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
     try:
         # Load BigQuery data for RFM fraud detection
         rfm_data = get_rfm_fraud_data()
-        st.info(f"🔍 RFM Debug: get_rfm_fraud_data() returned: {type(rfm_data)}, empty: {rfm_data.empty if rfm_data is not None else 'None'}")
+        # st.info(f"🔍 RFM Debug: get_rfm_fraud_data() returned: {type(rfm_data)}, empty: {rfm_data.empty if rfm_data is not None else 'None'}")
         
         if rfm_data is not None and not rfm_data.empty:
-            st.success("✅ RFM: Real BigQuery data loaded")
+            # st.success("✅ RFM: Real BigQuery data loaded")
             
             # Debug information
-            with st.expander("🔍 RFM Data Debug", expanded=False):
-                st.info(f"📊 Data Shape: {rfm_data.shape}")
-                st.info(f"📋 Columns: {list(rfm_data.columns)}")
-                st.dataframe(rfm_data.head(3), use_container_width=True)
-                st.info(f"🔍 Latest data: {rfm_data.iloc[-1].to_dict() if len(rfm_data) > 0 else 'No data'}")
+            # with st.expander("🔍 RFM Data Debug", expanded=False):
+            #     st.info(f"📊 Data Shape: {rfm_data.shape}")
+            #     st.info(f"📋 Columns: {list(rfm_data.columns)}")
+            #     st.dataframe(rfm_data.head(3), use_container_width=True)
+            #     st.info(f"🔍 Latest data: {rfm_data.iloc[-1].to_dict() if len(rfm_data) > 0 else 'No data'}")
             
             # Check if required column exists
             if 'total_caught_per' in rfm_data.columns:
                 # Get latest RFM data
                 latest_rfm = rfm_data.iloc[-1]
                 current_catch_rate = latest_rfm['total_caught_per']
-                st.info(f"🔍 RFM Debug: Latest catch rate = {current_catch_rate}")
+                # st.info(f"🔍 RFM Debug: Latest catch rate = {current_catch_rate}")
                 
                 # Calculate trend from previous month
                 if len(rfm_data) > 1:
@@ -3083,9 +3447,9 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
                     rfm_status = 'red'
                     trend = 'down'
                 
-                st.info(f"🔍 RFM Debug: Using REAL data - {current_catch_rate}% -> {rfm_status}")
-                st.info(f"🔍 RFM Debug: Data type of current_catch_rate: {type(current_catch_rate)}")
-                st.info(f"🔍 RFM Debug: Raw value: {current_catch_rate}")
+                # st.info(f"🔍 RFM Debug: Using REAL data - {current_catch_rate}% -> {rfm_status}")
+                # st.info(f"🔍 RFM Debug: Data type of current_catch_rate: {type(current_catch_rate)}")
+                # st.info(f"🔍 RFM Debug: Raw value: {current_catch_rate}")
             
                 metrics['RFM Score'] = {
                     'value': round(current_catch_rate, 1),
@@ -3094,11 +3458,11 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
                     'change': round(trend_change, 1),
                     'unit': '%'
                 }
-                st.info(f"🔍 RFM Debug: FINAL metrics['RFM Score'] = {metrics['RFM Score']}")
-                st.success(f"✅ RFM Score set to REAL value: {current_catch_rate}%")
+                # st.info(f"🔍 RFM Debug: FINAL metrics['RFM Score'] = {metrics['RFM Score']}")
+                # st.success(f"✅ RFM Score set to REAL value: {current_catch_rate}%")
             else:
-                st.warning("⚠️ RFM: Column 'total_caught_per' not found in BigQuery data")
-                st.info("🔄 Available columns: " + ", ".join(rfm_data.columns))
+                # st.warning("⚠️ RFM: Column 'total_caught_per' not found in BigQuery data")
+                # st.info("🔄 Available columns: " + ", ".join(rfm_data.columns))
                 # Calculate status for fallback value (92.6%)
                 fallback_value = 92.6
                 if fallback_value >= 75:
@@ -3107,13 +3471,13 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
                     fallback_status = 'yellow'
                 else:
                     fallback_status = 'red'
-                st.info(f"🔍 RFM Debug: Using FALLBACK data - {fallback_value}% -> {fallback_status}")
+                # st.info(f"🔍 RFM Debug: Using FALLBACK data - {fallback_value}% -> {fallback_status}")
                 metrics['RFM Score'] = {'value': fallback_value, 'status': fallback_status, 'trend': 'up', 'change': 1.2, 'unit': '%'}
-                st.info(f"🔍 RFM Debug: FINAL metrics['RFM Score'] = {metrics['RFM Score']}")
+                # st.info(f"🔍 RFM Debug: FINAL metrics['RFM Score'] = {metrics['RFM Score']}")
         else:
             # Fallback to dummy data
-            st.warning("⚠️ RFM: No data from BigQuery - using fallback data")
-            st.info(f"🔍 RFM Debug: rfm_data is {rfm_data}")
+            # st.warning("⚠️ RFM: No data from BigQuery - using fallback data")
+            # st.info(f"🔍 RFM Debug: rfm_data is {rfm_data}")
             # Calculate status for fallback value (92.6%)
             fallback_value = 92.6
             if fallback_value >= 75:
@@ -3122,12 +3486,12 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
                 fallback_status = 'yellow'
             else:
                 fallback_status = 'red'
-            st.info(f"🔍 RFM Debug: Using FALLBACK data (no BigQuery) - {fallback_value}% -> {fallback_status}")
+            # st.info(f"🔍 RFM Debug: Using FALLBACK data (no BigQuery) - {fallback_value}% -> {fallback_status}")
             metrics['RFM Score'] = {'value': fallback_value, 'status': fallback_status, 'trend': 'up', 'change': 1.2, 'unit': '%'}
-            st.info(f"🔍 RFM Debug: FINAL metrics['RFM Score'] = {metrics['RFM Score']}")
+            # st.info(f"🔍 RFM Debug: FINAL metrics['RFM Score'] = {metrics['RFM Score']}")
     except Exception as e:
-        st.warning(f"⚠️ Could not calculate RFM metrics: {str(e)}")
-        st.info("🔄 Using fallback data")
+        # st.warning(f"⚠️ Could not calculate RFM metrics: {str(e)}")
+        # st.info("🔄 Using fallback data")
         # Fallback to dummy data
         # Calculate status for fallback value (92.6%)
         fallback_value = 92.6
@@ -3137,9 +3501,9 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
             fallback_status = 'yellow'
         else:
             fallback_status = 'red'
-        st.info(f"🔍 RFM Debug: Using FALLBACK data (exception) - {fallback_value}% -> {fallback_status}")
+        # st.info(f"🔍 RFM Debug: Using FALLBACK data (exception) - {fallback_value}% -> {fallback_status}")
         metrics['RFM Score'] = {'value': fallback_value, 'status': fallback_status, 'trend': 'up', 'change': 1.2, 'unit': '%'}
-        st.info(f"🔍 RFM Debug: FINAL metrics['RFM Score'] = {metrics['RFM Score']}")
+        # st.info(f"🔍 RFM Debug: FINAL metrics['RFM Score'] = {metrics['RFM Score']}")
     
     # Add existing dummy metrics for other categories (but preserve real RFM calculation)
     dummy_metrics = get_dummy_metrics_for_remaining()
@@ -3184,7 +3548,7 @@ def calculate_comprehensive_health_metrics_simple(transaction_df, bio_auth_df, c
     except Exception as e:
         st.warning(f"⚠️ Error in comprehensive metrics: {str(e)}")
     
-    st.success(f"✅ Enhanced {len(metrics)} metrics with real data calculations!")
+    # st.success(f"✅ Enhanced {len(metrics)} metrics with real data calculations!")
     return metrics
 
 def get_dummy_metrics_for_remaining():
@@ -3250,10 +3614,10 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
     # Real data metrics from BigQuery
     if not transaction_df.empty:
         # Debug: Show what columns we actually have
-        st.info(f"📊 Transaction DataFrame columns: {list(transaction_df.columns)}")
-        st.info(f"📊 Transaction DataFrame shape: {transaction_df.shape}")
-        if len(transaction_df) > 0:
-            st.info(f"📊 Sample data: {transaction_df.head(1).to_dict('records')}")
+        # st.info(f"📊 Transaction DataFrame columns: {list(transaction_df.columns)}")
+        # st.info(f"📊 Transaction DataFrame shape: {transaction_df.shape}")
+        # if len(transaction_df) > 0:
+        #     st.info(f"📊 Sample data: {transaction_df.head(1).to_dict('records')}")
         
         # Transaction Success Rate (higher is better)
         try:
@@ -3380,7 +3744,7 @@ def calculate_comprehensive_health_metrics_simple(transaction_df, bio_auth_df, c
     except Exception as e:
         st.warning(f"⚠️ Error in comprehensive metrics: {str(e)}")
     
-    st.success(f"✅ Enhanced {len(metrics)} metrics with real data calculations!")
+    # st.success(f"✅ Enhanced {len(metrics)} metrics with real data calculations!")
     return metrics
 
 def get_dummy_metrics_for_remaining():
@@ -3487,6 +3851,7 @@ def show_cash_product_dashboard():
     # Back button
     if st.button("← Back to Main Dashboard", key="back_to_main_cash"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
     
     st.info("💡 Cash Product analytics and performance metrics")
@@ -3652,6 +4017,7 @@ def show_churn_intelligence_dashboard():
     # Back button
     if st.button("← Back to Main Dashboard", key="back_to_main_churn"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
     
     st.info("💡 Advanced churn analysis and user retention insights")
@@ -3747,20 +4113,41 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
     
     # Real data metrics from BigQuery
     if not transaction_df.empty:
+        # Filter to only show data up to the last completed hour
+        from datetime import datetime
+        current_hour = datetime.now().hour
+        last_completed_hour = current_hour - 1 if current_hour > 0 else 0
+        last_completed_hour_str = f"{last_completed_hour:02d}:00"
+        
+        # Filter out future hours (only keep hours < current hour, so incomplete current hour is excluded)
+        if 'hour' in transaction_df.columns:
+            def is_completed_hour(hour_str):
+                try:
+                    if pd.isna(hour_str):
+                        return False
+                    hour_num = int(str(hour_str).split(':')[0])
+                    return hour_num < current_hour
+                except:
+                    return False
+            
+            transaction_df = transaction_df[transaction_df['hour'].apply(is_completed_hour)].copy()
+            # st.success(f"🕐 Filtered to completed hours only (up to {last_completed_hour_str} - representing data from {last_completed_hour_str} to {current_hour:02d}:00)")
+        
         # Debug: Show what columns we actually have
-        st.info(f"📊 Transaction DataFrame columns: {list(transaction_df.columns)}")
-        st.info(f"📊 Transaction DataFrame shape: {transaction_df.shape}")
-        if len(transaction_df) > 0:
-            st.info(f"📊 Sample data: {transaction_df.head(1).to_dict('records')}")
+        # st.info(f"📊 Transaction DataFrame columns: {list(transaction_df.columns)}")
+        # st.info(f"📊 Transaction DataFrame shape: {transaction_df.shape}")
+        # if len(transaction_df) > 0:
+        #     st.info(f"📊 Sample data: {transaction_df.head(1).to_dict('records')}")
         
             # Check if required columns exist and get the latest (current) values
             if 'overall_success_rate' not in transaction_df.columns:
-                st.error("❌ Missing 'overall_success_rate' column in transaction data")
+                # st.error("❌ Missing 'overall_success_rate' column in transaction data")
                 current_success = 0
             else:
-                # Get the most recent hour's success rate (not average)
-                latest_data = transaction_df.sort_values('hour').tail(1)
-                if not latest_data.empty:
+                # Get the most recent hour's success rate from today's data (not null values)
+                today_data = transaction_df[transaction_df['overall_success_rate'].notna()].copy()
+                if not today_data.empty:
+                    latest_data = today_data.sort_values('hour').tail(1)
                     try:
                         current_success = float(latest_data['overall_success_rate'].iloc[0])
                         if pd.isna(current_success):
@@ -3768,11 +4155,12 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
                     except (ValueError, TypeError):
                         current_success = 0
                 else:
+                    latest_data = transaction_df.sort_values('hour').tail(1)
                     current_success = 0
-                st.success(f"✅ Current success rate: {current_success:.2f}%")
+                # st.success(f"✅ Current success rate: {current_success:.2f}%")
             
             if 'median_success_rate' not in transaction_df.columns:
-                st.warning("⚠️ Missing 'median_success_rate' column, using current as fallback")
+                # st.warning("⚠️ Missing 'median_success_rate' column, using current as fallback")
                 median_success = current_success
             else:
                 # Get median from the latest hour
@@ -3792,7 +4180,7 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
                         median_success = current_success
                 else:
                     median_success = current_success
-                st.success(f"✅ Median success rate: {median_success:.2f}%")
+                # st.success(f"✅ Median success rate: {median_success:.2f}%")
         
         # Calculate standard deviation for dynamic thresholds
         try:
@@ -3821,6 +4209,26 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
         else:
             status = 'red'  # Below acceptable threshold (needs attention)
         
+        # Count anomalies if column exists
+        anomaly_count = 0
+        if 'success_rate_anomaly' in transaction_df.columns:
+            try:
+                anomaly_count = len(transaction_df[transaction_df['success_rate_anomaly'] != 'normal'])
+            except:
+                anomaly_count = 0
+        
+        # Get aggregator breakdown from latest data
+        aggregator_breakdown = {}
+        if not latest_data.empty:
+            for agg_name in ['ybl', 'nsdl', 'ybln']:
+                col_name = f'{agg_name}_success_rate'
+                if col_name in latest_data.columns:
+                    try:
+                        val = float(latest_data[col_name].iloc[0])
+                        aggregator_breakdown[agg_name.upper()] = round(val, 2) if not pd.isna(val) else 0.0
+                    except:
+                        aggregator_breakdown[agg_name.upper()] = 0.0
+        
         metrics['Transaction Success Rate'] = {
             'value': round(current_success, 1),
             'median': round(median_success, 1),
@@ -3829,32 +4237,35 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
             'change': round(current_success - median_success, 1),
             'hourly_data': transaction_df.to_dict('records'),
             'std_dev': round(std_dev, 2),
-            'anomaly_count': len(transaction_df[transaction_df['success_rate_anomaly'] != 'normal'])
+            'anomaly_count': anomaly_count,
+            'aggregator_breakdown': aggregator_breakdown
         }
         
         # GTV Performance with statistical thresholds
         # Handle GTV calculation with proper column names from new query structure
         if 'total_amount_cr' in transaction_df.columns:
             try:
-                current_gtv = float(pd.to_numeric(transaction_df['total_amount_cr'], errors='coerce').sum())
-                st.success(f"✅ Total GTV: {current_gtv:.2f} Cr")
+                # Sum only non-null values (today's actual hourly GTVs)
+                current_gtv = float(pd.to_numeric(transaction_df['total_amount_cr'].dropna(), errors='coerce').sum())
+                # st.success(f"✅ Total GTV Today: {current_gtv:.2f} Cr")
             except (ValueError, TypeError) as e:
-                st.error(f"❌ Error converting GTV: {e}")
+                # st.error(f"❌ Error converting GTV: {e}")
                 current_gtv = 100.0
         else:
-            st.warning("⚠️ No total_amount_cr column found, using fallback")
+            # st.warning("⚠️ No total_amount_cr column found, using fallback")
             current_gtv = 100.0
         
-        # Get historical average GTV
-        if 'avg_amount_cr' in transaction_df.columns:
+        # Get historical median GTV (sum of hourly medians for completed hours only)
+        if 'median_amount_cr' in transaction_df.columns:
             try:
-                median_gtv = float(pd.to_numeric(transaction_df['avg_amount_cr'], errors='coerce').mean())
-                st.success(f"✅ Average GTV: {median_gtv:.2f} Cr")
+                # Sum the hourly medians for completed hours (fair comparison with actual)
+                median_gtv = float(pd.to_numeric(transaction_df['median_amount_cr'].dropna(), errors='coerce').sum())
+                # st.success(f"✅ Expected GTV So Far (7-day median for completed hours): {median_gtv:.2f} Cr")
             except (ValueError, TypeError) as e:
-                st.error(f"❌ Error converting avg GTV: {e}")
+                # st.error(f"❌ Error converting median GTV: {e}")
                 median_gtv = current_gtv * 0.9
         else:
-            st.warning("⚠️ No avg_amount_cr column found, using 90% of current")
+            # st.warning("⚠️ No median_amount_cr column found, using 90% of current")
             median_gtv = current_gtv * 0.9
         
         gtv_std = abs(current_gtv - median_gtv) if median_gtv > 0 else current_gtv * 0.1
@@ -3874,34 +4285,45 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
             'trend': 'up' if current_gtv > median_gtv else 'down' if current_gtv < median_gtv else 'stable',
             'change': round(((current_gtv - median_gtv) / median_gtv) * 100, 1) if median_gtv > 0 else 0,
             'unit': 'Cr',
-            'std_dev': round(gtv_std, 2)
+            'std_dev': round(gtv_std, 2),
+            'hourly_data': transaction_df.to_dict('records'),  # Include hourly breakdown for visualization
+            'total_txns': int(transaction_df[transaction_df['success_txns'].notna()]['success_txns'].sum()) if 'success_txns' in transaction_df.columns else 0
         }
         
         # Aggregator performance with statistical thresholds
         for agg in ['YBL', 'NSDL', 'YBLN']:
             agg_lower = agg.lower()
             
-            # Get current value from latest data
+            # Initialize variables
+            current_agg = 0
+            agg_data = pd.DataFrame()
+            latest_agg_data = pd.DataFrame()
+            
+            # Get current value from latest data (today's actual data only)
             if f'{agg_lower}_success_rate' in transaction_df.columns:
                 try:
-                    # Get the latest hour's value, not the average
-                    latest_data = transaction_df.sort_values('hour').tail(1)
-                    current_agg = float(latest_data[f'{agg_lower}_success_rate'].iloc[0])
+                    # Get the latest hour's value from non-null data
+                    agg_data = transaction_df[transaction_df[f'{agg_lower}_success_rate'].notna()].copy()
+                    if not agg_data.empty:
+                        latest_agg_data = agg_data.sort_values('hour').tail(1)
+                        current_agg = float(latest_agg_data[f'{agg_lower}_success_rate'].iloc[0])
+                        if pd.isna(current_agg):
+                            current_agg = 0
                 except (ValueError, TypeError, IndexError):
                     current_agg = 0
-            else:
-                current_agg = 0
             
             # Get median value from the actual median columns
             median_col = f'median_{agg_lower}_success_rate'
-            if median_col in transaction_df.columns:
+            median_agg = current_agg
+            if median_col in transaction_df.columns and not latest_agg_data.empty:
                 try:
                     # Get the latest hour's median value
-                    median_agg = float(latest_data[median_col].iloc[0])
+                    if median_col in latest_agg_data.columns:
+                        median_agg = float(latest_agg_data[median_col].iloc[0])
+                        if pd.isna(median_agg):
+                            median_agg = current_agg
                 except (ValueError, TypeError, IndexError):
                     median_agg = current_agg
-            else:
-                median_agg = current_agg
             
             agg_std = abs(current_agg - median_agg) if median_agg > 0 else 5.0
             
@@ -3938,35 +4360,35 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
     
     if not bio_auth_df.empty:
         # Debug: Show what columns we actually have for bio auth
-        st.info(f"📊 Bio Auth DataFrame columns: {list(bio_auth_df.columns)}")
-        st.info(f"📊 Bio Auth DataFrame shape: {bio_auth_df.shape}")
-        if len(bio_auth_df) > 0:
-            st.info(f"📊 Bio Auth sample: {bio_auth_df.head(1).to_dict('records')}")
+        # st.info(f"📊 Bio Auth DataFrame columns: {list(bio_auth_df.columns)}")
+        # st.info(f"📊 Bio Auth DataFrame shape: {bio_auth_df.shape}")
+        # if len(bio_auth_df) > 0:
+        #     st.info(f"📊 Bio Auth sample: {bio_auth_df.head(1).to_dict('records')}")
         
         # 2FA Success Rate with statistical thresholds
         if 'fa2_rate_yesterday' not in bio_auth_df.columns:
-            st.error("❌ Missing 'fa2_rate_yesterday' column in bio auth data")
+            # st.error("❌ Missing 'fa2_rate_yesterday' column in bio auth data")
             current_fa2 = 0
         else:
             current_fa2 = bio_auth_df['fa2_rate_yesterday'].mean()
             # Handle NaN values
             if pd.isna(current_fa2):
-                st.error("❌ Current 2FA rate is NaN")
+                # st.error("❌ Current 2FA rate is NaN")
                 current_fa2 = 0
             else:
-                st.success(f"✅ Current 2FA rate: {current_fa2}")
+                pass  # st.success(f"✅ Current 2FA rate: {current_fa2}")
         
         if 'median_fa2_succ_rate' not in bio_auth_df.columns:
-            st.warning("⚠️ Missing 'median_fa2_succ_rate' column, using current as fallback")
+            # st.warning("⚠️ Missing 'median_fa2_succ_rate' column, using current as fallback")
             median_fa2 = current_fa2
         else:
             median_fa2 = bio_auth_df['median_fa2_succ_rate'].mean()
             # Handle NaN values
             if pd.isna(median_fa2):
-                st.error("❌ Median 2FA rate is NaN")
+                # st.error("❌ Median 2FA rate is NaN")
                 median_fa2 = current_fa2
             else:
-                st.success(f"✅ Median 2FA rate: {median_fa2}")
+                pass  # st.success(f"✅ Median 2FA rate: {median_fa2}")
         
         if 'fa2_rate_yesterday' in bio_auth_df.columns and 'median_fa2_succ_rate' in bio_auth_df.columns:
             fa2_std = abs(bio_auth_df['fa2_rate_yesterday'] - bio_auth_df['median_fa2_succ_rate']).std()
@@ -4518,259 +4940,8 @@ def calculate_comprehensive_health_metrics_simple(transaction_df, bio_auth_df, c
                             'unit': '%',
                             'std_dev': round(std_efficiency, 2)  # Add std deviation for 30-day period
                         }
-                        
-                        # Display detailed bucket-wise analysis
-                        st.markdown("### 📊 M2B Pendency Bucket Analysis")
-                        bucket_analysis = latest_data.groupby('time_bucket')['client_count'].sum().reset_index()
-                        bucket_analysis['percentage'] = (bucket_analysis['client_count'] / bucket_analysis['client_count'].sum() * 100).round(1)
-                        
-                        # Sort in ascending order by time bucket
-                        bucket_order = {'0 min': 1, '1-4 min': 2, '5-10 min': 3, '10-60 min': 4, '1-24 hour': 5, 'Next Day': 6}
-                        bucket_analysis['sort_order'] = bucket_analysis['time_bucket'].map(bucket_order)
-                        bucket_analysis = bucket_analysis.sort_values('sort_order').drop('sort_order', axis=1)
-                        
-                        # Display bucket breakdown
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("⚡ No Pendency (0-4 min)", f"{immediate_processing:,}", f"{efficiency_pct:.1f}%")
-                            st.caption("Includes: 0 min + 1-4 min")
-                        with col2:
-                            st.metric("⏱️ With Pendency (5+ min)", f"{delayed_processing:,}", f"{100-efficiency_pct:.1f}%")
-                            st.caption("Includes: 5-10 min, 10-60 min, 1-24 hr, Next Day")
-                        with col3:
-                            st.metric("📈 Total Transactions", f"{total_clients:,}", "")
-                        
-                        # Show important note about pendency definition
-                        st.info("📝 **Note**: Transactions in **0 min** and **1-4 min** buckets are considered to have **NO PENDENCY**. Only transactions taking **5+ minutes** are considered to have pendency issues.")
-                        
-                        # Show bucket breakdown table
-                        st.dataframe(bucket_analysis, width='stretch')
-                        
-                        # Advanced Analytics Section
-                        st.markdown("### 📈 Advanced M2B Analytics")
-                        
-                        # Create tabs for different analytics views
-                        tab1, tab2, tab3, tab4 = st.tabs(["📊 Trends", "🔍 Patterns", "⚡ Performance", "💡 Insights"])
-                        
-                        with tab1:
-                            st.markdown("#### 📈 30-Day Trend Analysis")
-                            
-                            # Calculate daily efficiency trends
-                            daily_trends = []
-                            for day in m2b_df['date'].dt.date.unique():
-                                day_data = m2b_df[m2b_df['date'].dt.date == day]
-                                # Calculate no pendency (0 min + 1-4 min)
-                                day_no_pendency = day_data[day_data['time_bucket'].isin(['0 min', '1-4 min'])]['client_count'].sum()
-                                day_total = day_data['client_count'].sum()
-                                if day_total > 0:
-                                    daily_efficiency = (day_no_pendency / day_total) * 100
-                                    daily_trends.append({
-                                        'date': day,
-                                        'efficiency': daily_efficiency,
-                                        'total_transactions': day_total,
-                                        'immediate': day_no_pendency,
-                                        'delayed': day_total - day_no_pendency
-                                    })
-                            
-                            if daily_trends:
-                                trends_df = pd.DataFrame(daily_trends)
-                                trends_df = trends_df.sort_values('date')
-                                
-                                # Create trend chart
-                                fig_trend = px.line(trends_df, x='date', y='efficiency', 
-                                                  title='M2B Processing Efficiency Trend (30 Days)',
-                                                  labels={'efficiency': 'Efficiency %', 'date': 'Date'})
-                                fig_trend.add_hline(y=median_efficiency, line_dash="dash", 
-                                                  annotation_text=f"Median: {median_efficiency:.1f}%")
-                                st.plotly_chart(fig_trend, use_container_width=True)
-                                
-                                # Show trend statistics
-                                col1, col2, col3, col4 = st.columns(4)
-                                with col1:
-                                    st.metric("📈 Best Day", f"{trends_df['efficiency'].max():.1f}%", 
-                                             f"{trends_df.loc[trends_df['efficiency'].idxmax(), 'date']}")
-                                with col2:
-                                    st.metric("📉 Worst Day", f"{trends_df['efficiency'].min():.1f}%", 
-                                             f"{trends_df.loc[trends_df['efficiency'].idxmin(), 'date']}")
-                                with col3:
-                                    st.metric("📊 Average", f"{trends_df['efficiency'].mean():.1f}%", 
-                                             f"±{trends_df['efficiency'].std():.1f}%")
-                                with col4:
-                                    trend_direction = "📈 Improving" if trends_df['efficiency'].iloc[-1] > trends_df['efficiency'].iloc[0] else "📉 Declining"
-                                    st.metric("🎯 Trend", trend_direction, 
-                                             f"{trends_df['efficiency'].iloc[-1] - trends_df['efficiency'].iloc[0]:+.1f}%")
-                        
-                        with tab2:
-                            st.markdown("#### 🔍 Processing Pattern Analysis")
-                            
-                            # Analyze processing patterns by time buckets
-                            bucket_patterns = latest_data.groupby('time_bucket')['client_count'].sum().reset_index()
-                            bucket_patterns['percentage'] = (bucket_patterns['client_count'] / bucket_patterns['client_count'].sum() * 100).round(1)
-                            
-                            # Create pattern visualization
-                            fig_pattern = px.pie(bucket_patterns, values='client_count', names='time_bucket',
-                                                title='M2B Processing Time Distribution')
-                            st.plotly_chart(fig_pattern, use_container_width=True)
-                            
-                            # Pattern insights
-                            st.markdown("##### 🎯 Pattern Insights:")
-                            
-                            immediate_pct = bucket_patterns[bucket_patterns['time_bucket'] == '0 min']['percentage'].iloc[0] if len(bucket_patterns[bucket_patterns['time_bucket'] == '0 min']) > 0 else 0
-                            delayed_1_4 = bucket_patterns[bucket_patterns['time_bucket'] == '1-4 min']['percentage'].iloc[0] if len(bucket_patterns[bucket_patterns['time_bucket'] == '1-4 min']) > 0 else 0
-                            next_day = bucket_patterns[bucket_patterns['time_bucket'] == 'Next Day']['percentage'].iloc[0] if len(bucket_patterns[bucket_patterns['time_bucket'] == 'Next Day']) > 0 else 0
-                            
-                            if immediate_pct > 70:
-                                st.success(f"✅ **Excellent**: {immediate_pct:.1f}% of transactions process immediately")
-                            elif immediate_pct > 50:
-                                st.warning(f"⚠️ **Good**: {immediate_pct:.1f}% immediate processing - room for improvement")
-                            else:
-                                st.error(f"❌ **Needs Attention**: Only {immediate_pct:.1f}% immediate processing")
-                            
-                            if next_day > 10:
-                                st.error(f"🚨 **Critical**: {next_day:.1f}% of transactions process next day - investigate delays")
-                            elif next_day > 5:
-                                st.warning(f"⚠️ **Monitor**: {next_day:.1f}% next-day processing")
-                            else:
-                                st.success(f"✅ **Good**: Only {next_day:.1f}% next-day processing")
-                        
-                        with tab3:
-                            st.markdown("#### ⚡ Performance Benchmarking")
-                            
-                            # Performance metrics
-                            col1, col2 = st.columns(2)
-                            
-                            with col1:
-                                st.markdown("##### 📊 Current Performance")
-                                
-                                # Calculate performance score
-                                performance_score = min(100, max(0, (efficiency_pct - 50) * 2))
-                                
-                                if performance_score >= 80:
-                                    perf_status = "🟢 Excellent"
-                                    perf_color = "green"
-                                elif performance_score >= 60:
-                                    perf_status = "🟡 Good"
-                                    perf_color = "orange"
-                                else:
-                                    perf_status = "🔴 Needs Improvement"
-                                    perf_color = "red"
-                                
-                                st.metric("Performance Score", f"{performance_score:.0f}/100", perf_status)
-                                
-                                # Efficiency gauge
-                                fig_gauge = go.Figure(go.Indicator(
-                                    mode = "gauge+number+delta",
-                                    value = efficiency_pct,
-                                    domain = {'x': [0, 1], 'y': [0, 1]},
-                                    title = {'text': "Processing Efficiency"},
-                                    delta = {'reference': median_efficiency},
-                                    gauge = {
-                                        'axis': {'range': [None, 100]},
-                                        'bar': {'color': perf_color},
-                                        'steps': [
-                                            {'range': [0, 50], 'color': "lightgray"},
-                                            {'range': [50, 80], 'color': "yellow"},
-                                            {'range': [80, 100], 'color': "green"}
-                                        ],
-                                        'threshold': {
-                                            'line': {'color': "red", 'width': 4},
-                                            'thickness': 0.75,
-                                            'value': 90
-                                        }
-                                    }
-                                ))
-                                fig_gauge.update_layout(height=300)
-                                st.plotly_chart(fig_gauge, use_container_width=True)
-                            
-                            with col2:
-                                st.markdown("##### 🎯 Benchmarking")
-                                
-                                # Industry benchmarks (example values)
-                                industry_avg = 75.0
-                                top_performer = 90.0
-                                
-                                benchmark_data = {
-                                    'Metric': ['Current', 'Industry Avg', 'Top Performer', 'Your Median'],
-                                    'Efficiency %': [efficiency_pct, industry_avg, top_performer, median_efficiency]
-                                }
-                                
-                                fig_benchmark = px.bar(pd.DataFrame(benchmark_data), 
-                                                     x='Metric', y='Efficiency %',
-                                                     title='Performance Benchmarking',
-                                                     color='Efficiency %',
-                                                     color_continuous_scale='RdYlGn')
-                                st.plotly_chart(fig_benchmark, use_container_width=True)
-                                
-                                # Benchmark insights
-                                if efficiency_pct > industry_avg:
-                                    st.success(f"🏆 **Above Industry Average** (+{efficiency_pct - industry_avg:.1f}%)")
-                                else:
-                                    st.warning(f"📈 **Below Industry Average** ({efficiency_pct - industry_avg:.1f}%)")
-                        
-                        with tab4:
-                            st.markdown("#### 💡 Actionable Insights & Recommendations")
-                            
-                            # Generate insights based on data
-                            insights = []
-                            recommendations = []
-                            
-                            # Insight 1: Efficiency analysis
-                            if efficiency_pct > median_efficiency:
-                                insights.append(f"✅ Processing efficiency is {efficiency_pct - median_efficiency:.1f}% above your 30-day median")
-                            else:
-                                insights.append(f"⚠️ Processing efficiency is {median_efficiency - efficiency_pct:.1f}% below your 30-day median")
-                            
-                            # Insight 2: Immediate processing analysis
-                            if immediate_pct > 70:
-                                insights.append("🎯 Excellent immediate processing rate - maintain current operations")
-                            elif immediate_pct > 50:
-                                insights.append("📈 Good immediate processing - consider optimizing for higher rates")
-                                recommendations.append("🔧 Review system bottlenecks in 0-minute processing")
-                            else:
-                                insights.append("🚨 Low immediate processing rate - investigate system performance")
-                                recommendations.append("🔧 Urgent: Investigate system bottlenecks and processing delays")
-                            
-                            # Insight 3: Delayed processing analysis
-                            if next_day > 10:
-                                insights.append("🚨 High next-day processing rate - critical system issues")
-                                recommendations.append("🔧 Immediate action required: Investigate overnight processing failures")
-                            elif next_day > 5:
-                                insights.append("⚠️ Moderate next-day processing - monitor closely")
-                                recommendations.append("🔧 Review overnight batch processing procedures")
-                            
-                            # Display insights
-                            st.markdown("##### 🔍 Key Insights")
-                            for insight in insights:
-                                st.markdown(f"- {insight}")
-                            
-                            if recommendations:
-                                st.markdown("##### 🎯 Recommendations")
-                                for rec in recommendations:
-                                    st.markdown(f"- {rec}")
-                            
-                            # Performance optimization suggestions
-                            st.markdown("##### 🚀 Optimization Opportunities")
-                            
-                            opt_col1, opt_col2 = st.columns(2)
-                            
-                            with opt_col1:
-                                st.markdown("**System Optimization:**")
-                                if immediate_pct < 80:
-                                    st.markdown("- 🔧 Optimize real-time processing algorithms")
-                                if next_day > 5:
-                                    st.markdown("- 🔧 Improve overnight batch processing")
-                                st.markdown("- 📊 Implement real-time monitoring alerts")
-                                st.markdown("- 🔄 Set up automated failover mechanisms")
-                            
-                            with opt_col2:
-                                st.markdown("**Process Improvements:**")
-                                st.markdown("- 📈 Set efficiency targets (80%+ immediate)")
-                                st.markdown("- ⏰ Monitor processing time SLAs")
-                                st.markdown("- 🎯 Implement performance dashboards")
-                                st.markdown("- 📋 Create escalation procedures")
                     else:
                         # No data for latest date - use fallback
-                        st.warning("⚠️ M2B: No data for latest date, using fallback metrics")
                         metrics['M2B Pendency'] = {
                             'value': 75.0,  # Default efficiency
                             'median': 75.0,
@@ -4781,7 +4952,6 @@ def calculate_comprehensive_health_metrics_simple(transaction_df, bio_auth_df, c
                         }
                 else:
                     # No latest date available - use fallback
-                    st.warning("⚠️ M2B: No latest date available, using fallback metrics")
                     metrics['M2B Pendency'] = {
                         'value': 75.0,  # Default efficiency
                         'median': 75.0,
@@ -4792,7 +4962,6 @@ def calculate_comprehensive_health_metrics_simple(transaction_df, bio_auth_df, c
                     }
             else:
                 # No M2B data available - use fallback
-                st.warning("⚠️ M2B: No data available, using fallback metrics")
                 metrics['M2B Pendency'] = {
                     'value': 75.0,  # Default efficiency
                     'median': 75.0,
@@ -4884,7 +5053,7 @@ def calculate_comprehensive_health_metrics_simple(transaction_df, bio_auth_df, c
                     'change': round(growth_rate, 1),
                     'unit': ''
                 }
-                st.success(f"✅ New Users: {current_month_adds} (Growth: {growth_rate:.1f}%) - Status: {status_onboarding}")
+                # st.success(f"✅ New Users: {current_month_adds} (Growth: {growth_rate:.1f}%) - Status: {status_onboarding}")
     except Exception as e:
         st.warning(f"⚠️ Could not calculate New User metrics: {str(e)}")
     
@@ -4906,23 +5075,23 @@ def calculate_comprehensive_health_metrics_simple(transaction_df, bio_auth_df, c
         else:
             churn_rate = 0
             st.warning("⚠️ No churn data available")
+        
+        # Determine status based on churn rate (FIXED: moved outside else block)
+        if churn_rate < 3:
+            status_churn = 'green'
+        elif churn_rate < 8:
+            status_churn = 'yellow'
+        else:
+            status_churn = 'red'
             
-            # Determine status based on churn rate
-            if churn_rate < 3:
-                status_churn = 'green'
-            elif churn_rate < 8:
-                status_churn = 'yellow'
-            else:
-                status_churn = 'red'
-                
-            # Override the dummy data with real calculation
-            metrics['Churn Rate'] = {
-                'value': round(churn_rate, 1),
-                'status': status_churn,
-                'trend': 'down' if churn_rate < 5 else 'up',
-                'change': round(churn_rate - 3.2, 1)
-            }
-            st.success(f"✅ Churn Rate: {churn_rate:.1f}% - Status: {status_churn}")
+        # Override the dummy data with real calculation
+        metrics['Churn Rate'] = {
+            'value': round(churn_rate, 1),
+            'status': status_churn,
+            'trend': 'down' if churn_rate < 5 else 'up',
+            'change': round(churn_rate - 3.2, 1)
+        }
+        # st.success(f"✅ Churn Rate: {churn_rate:.1f}% - Status: {status_churn}")
     except Exception as e:
         st.warning(f"⚠️ Could not calculate Churn metrics: {str(e)}")
     
@@ -4952,7 +5121,7 @@ def calculate_comprehensive_health_metrics_simple(transaction_df, bio_auth_df, c
                 'change': round(stable_growth, 1),
                 'unit': 'K'
             }
-            st.success(f"✅ Stable Users: {current_stable/1000:.1f}K (Growth: {stable_growth:.1f}%) - Status: {status_stable}")
+            # st.success(f"✅ Stable Users: {current_stable/1000:.1f}K (Growth: {stable_growth:.1f}%) - Status: {status_stable}")
     except Exception as e:
         st.warning(f"⚠️ Could not calculate Stable Users metrics: {str(e)}")
     
@@ -4970,7 +5139,7 @@ def calculate_comprehensive_health_metrics_simple(transaction_df, bio_auth_df, c
             current_escalation = float(latest_data.get('reached_cc_per', 6.6))
             
             # Debug: Show what we're getting from the data
-            st.info(f"🔍 Bot Debug: reached_cc_per = {current_escalation}")
+            # st.info(f"🔍 Bot Debug: reached_cc_per = {current_escalation}")
             
             # Smart thresholds based on your actual data patterns
             # Green: <= 6.5%, Yellow: 6.5-7.5%, Red: > 7.5%
@@ -4993,7 +5162,7 @@ def calculate_comprehensive_health_metrics_simple(transaction_df, bio_auth_df, c
                 'change': round(change, 1),
                 'unit': '% escalation'
             }
-            st.success(f"✅ Bot Analytics: {current_escalation:.1f}% escalation - Status: {status}")
+            # st.success(f"✅ Bot Analytics: {current_escalation:.1f}% escalation - Status: {status}")
         else:
             # Fallback when Google Sheets not available - use sample realistic data
             metrics['Bot Analytics'] = {
@@ -5046,7 +5215,7 @@ def calculate_comprehensive_health_metrics_simple(transaction_df, bio_auth_df, c
                     'change': -error_rate,  # Negative change indicates improvement
                     'unit': '% success rate'
                 }
-                st.success(f"✅ Bank Error Analysis: {success_rate:.1f}% success rate - Status: {status}")
+                # st.success(f"✅ Bank Error Analysis: {success_rate:.1f}% success rate - Status: {status}")
             else:
                 # Fallback when no bank error data available
                 metrics['Bank Error Analysis'] = {
@@ -5578,6 +5747,7 @@ def show_cash_product_dashboard():
     # Back button
     if st.button("← Back to Main Dashboard", key="back_to_main_cash"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
     
 # Real Cash Product Data - Integrated with clean_cash_dashboard.py for accurate metrics
@@ -5784,8 +5954,8 @@ def show_cash_product_dashboard():
                     df_mcc = client.query(mcc_query).to_dataframe()
                     
                     # Debug: Show the raw data
-                    st.write("**Debug - Raw Query Results:**")
-                    st.dataframe(df_mcc)
+                    # st.write("**Debug - Raw Query Results:**")
+                    # st.dataframe(df_mcc)
                     
                     if not df_mcc.empty and len(df_mcc) >= 2:
                         mtd_row = df_mcc[df_mcc['period'] == 'MTD'].iloc[0]
@@ -5921,6 +6091,7 @@ def show_login_success_dashboard():
     # Back button
     if st.button("← Back to Main Dashboard", key="back_to_main_login"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
     
     # Auto-load Google Sheets data (no UI options)
@@ -6304,6 +6475,7 @@ def show_bugs_dashboard():
     # Back button
     if st.button("← Back to Main Dashboard", key="back_to_main_bugs"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
     
     # Load bugs data - Try Google Sheets first, then CSV
@@ -6476,6 +6648,7 @@ def show_winback_dashboard():
     # Back button
     if st.button("← Back to Main Dashboard", key="back_to_main_winback"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
     
     # Load product metrics data
@@ -6658,10 +6831,11 @@ def show_product_metrics_dashboard():
     # Back button
     if st.button("← Back to Main Dashboard", key="back_to_main_product_metrics"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
     
     # Debug info
-    st.info("🔍 Debug: Product Metrics Dashboard loaded successfully!")
+    # st.info("🔍 Debug: Product Metrics Dashboard loaded successfully!")
     
     # Load product metrics data
     with st.spinner("🔄 Loading product metrics data..."):
@@ -7192,6 +7366,7 @@ def show_geographic_churn_dashboard():
     # Back button
     if st.button("← Back to Main Dashboard", key="back_to_main_geo"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
     
     # Load sales iteration data
@@ -7403,6 +7578,7 @@ def show_rfm_dashboard():
     # Back button
     if st.button("← Back to Main Dashboard", key="back_to_main_rfm"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
     
     # Load RFM data
@@ -7705,7 +7881,7 @@ def display_rfm_analysis(rfm_data):
                     st.error("🔴 **Needs Improvement** - Below 50%")
     
     with tab4:
-        st.markdown("### 💡 Actionable Insights & Recommendations")
+        st.markdown("### 🤖 AI-Powered Insights & Recommendations")
         
         # Generate insights based on data
         insights = []
@@ -7760,6 +7936,23 @@ def display_rfm_analysis(rfm_data):
             else:
                 insights.append("🚨 Low financial protection - significant improvement needed")
                 recommendations.append("💰 Urgent: Strengthen fraud detection to protect more funds")
+        
+        # Enhance recommendations with AI
+        ai_context = {
+            "current_performance": rfm_data['total_caught_per'].iloc[-1] if 'total_caught_per' in rfm_data.columns and len(rfm_data) > 0 else 0,
+            "avg_performance": rfm_data['total_caught_per'].mean() if 'total_caught_per' in rfm_data.columns else 0,
+            "app_catch_rate": rfm_data['app_caught_per'].mean() if 'app_caught_per' in rfm_data.columns else 0,
+            "web_catch_rate": rfm_data['web_caught_per'].mean() if 'web_caught_per' in rfm_data.columns else 0,
+            "total_fraud_amount": rfm_data['total_fr_amt'].sum() if 'total_fr_amt' in rfm_data.columns else 0,
+            "total_caught_amount": rfm_data['APP_WEB_caught_amt'].sum() if 'APP_WEB_caught_amt' in rfm_data.columns else 0,
+            "insights": insights
+        }
+        
+        recommendations = enhance_recommendations_with_ai(
+            rule_based_recommendations=recommendations,
+            context_data=ai_context,
+            recommendation_type="fraud"
+        )
         
         # Display insights
         st.markdown("##### 🔍 Key Insights")
@@ -7838,6 +8031,7 @@ def show_bot_analytics_dashboard():
     # Back button
     if st.button("← Back to Main Dashboard", key="back_to_main_bot"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
     
     # Auto-load Google Sheets data (no UI options)
@@ -8050,6 +8244,7 @@ def show_bot_analytics_dashboard():
     # Back button
     if st.button("← Back to Main Dashboard", key="back_to_main_bot"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
     
     # Auto-load Google Sheets data (no UI options)
@@ -8342,6 +8537,7 @@ def show_cc_calls_dashboard():
     # Back button
     if st.button("← Back to Main Dashboard", key="back_to_main_cc"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
     
 # Customer Care Calls Analysis - Lower calls indicate better system health (fewer customer issues)
@@ -8590,6 +8786,7 @@ def show_detailed_view(metric_name, metric_data):
     
     if st.button(back_label, key="back_button"):
         st.session_state.current_view = back_target
+        st.session_state.navigation_only = True
         st.rerun()
     
     # Current status - Skip for RFM Score
@@ -8613,25 +8810,6 @@ def show_detailed_view(metric_name, metric_data):
                 st.warning(f"🟡 **MONITORING REQUIRED** - {metric_name} needs attention")
             else:
                 st.error(f"🔴 **CRITICAL** - {metric_name} requires immediate action")
-        
-        # Key metrics
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            current_val = metric_data.get('value', 0)
-            st.metric("Current Value", f"{current_val:.1f}%")
-        
-        with col2:
-            median_val = metric_data.get('median', current_val)
-            st.metric("30-Day Median", f"{median_val:.1f}%")
-        
-        with col3:
-            change_val = metric_data.get('change', 0)
-            st.metric("vs Median", f"{change_val:+.1f}%")
-        
-        with col4:
-            std_dev = metric_data.get('std_dev', 0)
-            st.metric("Std Deviation", f"{std_dev:.2f}%")
     
     # Special handling for M2B Pendency with advanced analytics
     if metric_name == "M2B Pendency":
@@ -8826,6 +9004,7 @@ def show_detailed_view(metric_name, metric_data):
                         
                         immediate_pct = bucket_patterns[bucket_patterns['time_bucket'] == '0 min']['percentage'].iloc[0] if len(bucket_patterns[bucket_patterns['time_bucket'] == '0 min']) > 0 else 0
                         next_day = bucket_patterns[bucket_patterns['time_bucket'] == 'Next Day']['percentage'].iloc[0] if len(bucket_patterns[bucket_patterns['time_bucket'] == 'Next Day']) > 0 else 0
+                        total_txn = bucket_patterns['client_count'].sum()
                         
                         if immediate_pct > 70:
                             st.success(f"✅ **Excellent**: {immediate_pct:.1f}% of transactions process immediately")
@@ -8981,7 +9160,7 @@ def show_detailed_view(metric_name, metric_data):
                             st.caption("🟢 Score: 80/100")
                     
                     with tab4:
-                        st.markdown("#### 💡 Actionable Insights & Recommendations")
+                        st.markdown("#### 🤖 AI-Powered Insights & Recommendations")
                         
                         # Generate insights based on data
                         insights = []
@@ -9010,6 +9189,20 @@ def show_detailed_view(metric_name, metric_data):
                         elif next_day > 5:
                             insights.append("⚠️ Moderate next-day processing - monitor closely")
                             recommendations.append("🔧 Review overnight batch processing procedures")
+                        
+                        # Enhance recommendations with AI
+                        ai_context = {
+                            "immediate_pct": immediate_pct,
+                            "next_day": next_day,
+                            "total_txn": total_txn,
+                            "insights": insights
+                        }
+                        
+                        recommendations = enhance_recommendations_with_ai(
+                            rule_based_recommendations=recommendations,
+                            context_data=ai_context,
+                            recommendation_type="performance"
+                        )
                         
                         # Display insights
                         st.markdown("##### 🔍 Key Insights")
@@ -9284,7 +9477,7 @@ def show_detailed_view(metric_name, metric_data):
                         st.error("🔴 **Needs Improvement** - Below 50%")
             
             with tab4:
-                st.markdown("#### 💡 Actionable Insights & Recommendations")
+                st.markdown("#### 🤖 AI-Powered Insights & Recommendations")
                 
                 # Generate insights based on data
                 insights = []
@@ -9375,6 +9568,57 @@ def show_detailed_view(metric_name, metric_data):
         
         # Choose the right pipe metrics based on the metric name
         if metric_name == "Transaction Success Rate":
+            # Display overall transaction success rate at the top
+            st.markdown("### 📊 Overall Transaction Success Rate")
+            
+            # Get hourly data to calculate overall success rate
+            hourly_data = metric_data.get('hourly_data', [])
+            if hourly_data:
+                hourly_df = pd.DataFrame(hourly_data)
+                
+                # Calculate overall success rate (average of all completed hours)
+                if 'overall_success_rate' in hourly_df.columns:
+                    overall_success_rates = hourly_df['overall_success_rate'].dropna()
+                    if not overall_success_rates.empty:
+                        overall_current = overall_success_rates.mean()
+                        
+                        # Calculate overall median (average of median rates)
+                        overall_median = 0
+                        if 'median_success_rate' in hourly_df.columns:
+                            overall_median_rates = hourly_df['median_success_rate'].dropna()
+                            if not overall_median_rates.empty:
+                                overall_median = overall_median_rates.mean()
+                        
+                        # Display overall metrics
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            st.metric(
+                                "Overall Success Rate (Today)", 
+                                f"{overall_current:.1f}%",
+                                delta=f"{overall_current - overall_median:+.1f}% vs 7-day median"
+                            )
+                        
+                        with col2:
+                            st.metric(
+                                "7-Day Median Success Rate", 
+                                f"{overall_median:.1f}%"
+                            )
+                        
+                        with col3:
+                            # Calculate completion percentage
+                            from datetime import datetime
+                            current_hour = datetime.now().hour
+                            hours_completed = current_hour if current_hour > 0 else 1
+                            completion_pct = (hours_completed / 24) * 100
+                            st.metric(
+                                "Hours Analyzed", 
+                                f"{hours_completed}/24",
+                                delta=f"{completion_pct:.0f}% of day"
+                            )
+                        
+                        st.markdown("---")
+            
             # Use aggregator breakdown from the enhanced query
             aggregator_breakdown = metric_data.get('aggregator_breakdown', {})
             if aggregator_breakdown:
@@ -9538,29 +9782,48 @@ def show_detailed_view(metric_name, metric_data):
             total_txns = metric_data.get('total_txns', 0)
             st.metric("Total Transactions", f"{total_txns:,}")
         
-        # Generate sample hourly GTV data for visualization
-        hours = [f"{i:02d}:00" for i in range(24)]
-        gtv_values = [total_gtv/24 * (0.8 + 0.4*np.random.random()) for _ in hours]
-        median_values = [median_gtv/24] * 24
+        # Use actual hourly GTV data from query results (not fake data!)
+        hourly_data = metric_data.get('hourly_data', [])
         
-        gtv_df = pd.DataFrame({
-            'Hour': hours,
-            'Current GTV': gtv_values,
-            'Median GTV': median_values
-        })
-        
-        # GTV trend chart
-        fig_gtv = px.line(gtv_df, x='Hour', y=['Current GTV', 'Median GTV'],
-                         title='Hourly GTV Performance vs Median')
-        
-        # Add anomaly detection bands
-        upper_band = [median_gtv/24 * 1.2] * 24
-        lower_band = [median_gtv/24 * 0.8] * 24
-        
-        fig_gtv.add_scatter(x=hours, y=upper_band, mode='lines', name='Upper Threshold',
-                           line=dict(dash='dash', color='orange'), opacity=0.7)
-        fig_gtv.add_scatter(x=hours, y=lower_band, mode='lines', name='Lower Threshold',
-                           line=dict(dash='dash', color='red'), opacity=0.7)
+        if hourly_data:
+            # Convert to DataFrame for easier manipulation
+            hourly_df = pd.DataFrame(hourly_data)
+            
+            # Extract actual values from the query (keep NaN for hours without data)
+            hours = hourly_df['hour'].tolist() if 'hour' in hourly_df.columns else []
+            # Don't fill NaN with 0 - let Plotly handle missing data points
+            current_gtv_hourly = hourly_df['total_amount_cr'].tolist() if 'total_amount_cr' in hourly_df.columns else []
+            median_gtv_hourly = hourly_df['median_amount_cr'].tolist() if 'median_amount_cr' in hourly_df.columns else []
+            upper_bound = hourly_df['amount_cr_upper_bound'].tolist() if 'amount_cr_upper_bound' in hourly_df.columns else []
+            lower_bound = hourly_df['amount_cr_lower_bound'].tolist() if 'amount_cr_lower_bound' in hourly_df.columns else []
+            
+            gtv_df = pd.DataFrame({
+                'Hour': hours,
+                'Current GTV': current_gtv_hourly,
+                'Median GTV': median_gtv_hourly
+            })
+            
+            # GTV trend chart with ACTUAL data
+            fig_gtv = px.line(gtv_df, x='Hour', y=['Current GTV', 'Median GTV'],
+                             title='Hourly GTV Performance vs Median (Today vs Last 7 Days)')
+            
+            # Add actual threshold bands from query
+            if upper_bound and lower_bound:
+                fig_gtv.add_scatter(x=hours, y=upper_bound, mode='lines', name='Upper Threshold',
+                                   line=dict(dash='dash', color='orange'), opacity=0.7)
+                fig_gtv.add_scatter(x=hours, y=lower_bound, mode='lines', name='Lower Threshold',
+                                   line=dict(dash='dash', color='red'), opacity=0.7)
+        else:
+            # Fallback if no hourly data available
+            st.warning("⚠️ No hourly data available for GTV visualization")
+            hours = [f"{i:02d}:00" for i in range(24)]
+            gtv_df = pd.DataFrame({
+                'Hour': hours,
+                'Current GTV': [0] * 24,
+                'Median GTV': [0] * 24
+            })
+            fig_gtv = px.line(gtv_df, x='Hour', y=['Current GTV', 'Median GTV'],
+                             title='Hourly GTV Performance vs Median')
         
         fig_gtv.update_layout(height=500)
         st.plotly_chart(fig_gtv, use_container_width=True)
@@ -9568,10 +9831,17 @@ def show_detailed_view(metric_name, metric_data):
         # GTV distribution pie chart
         st.markdown("### 📊 GTV Distribution by Performance Band")
         
-        # Calculate performance bands
-        high_perf = sum(1 for val in gtv_values if val > median_gtv/24 * 1.1)
-        normal_perf = sum(1 for val in gtv_values if median_gtv/24 * 0.9 <= val <= median_gtv/24 * 1.1)
-        low_perf = sum(1 for val in gtv_values if val < median_gtv/24 * 0.9)
+        # Calculate performance bands using actual hourly data
+        if hourly_data and 'amount_cr_anomaly' in hourly_df.columns:
+            anomaly_counts = hourly_df['amount_cr_anomaly'].value_counts()
+            high_perf = anomaly_counts.get('upper anomaly ↑', 0)
+            normal_perf = anomaly_counts.get('normal', 0)
+            low_perf = anomaly_counts.get('lower anomaly ↓', 0)
+        else:
+            # Fallback calculation
+            high_perf = 0
+            normal_perf = 0
+            low_perf = 0
         
         perf_data = pd.DataFrame({
             'Performance': ['High Performance', 'Normal Performance', 'Low Performance'],
@@ -9890,6 +10160,7 @@ def show_new_user_onboarding_dashboard():
     
     if st.button("← Back to Main Dashboard", key="back_to_main_new_users"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
     
 # New User Analytics - Onboarding trends and AEPS activation rates with timing analysis
@@ -10578,6 +10849,7 @@ def show_churn_dashboard():
     # Back button
     if st.button("← Back to Main Dashboard", key="back_to_main_churn"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
     
     # Filters (exactly like the standalone app)
@@ -10714,7 +10986,7 @@ def show_churn_dashboard():
 
     # Churn Analysis Recommendations Section
     st.markdown("---")
-    section_badge("🎯 Churn Analysis Recommendations", "#e91e63", "#ff4081")
+    section_badge("🤖 AI-Powered Churn Recommendations", "#e91e63", "#ff4081")
     
     # Calculate key metrics for recommendations
     total_agents = len(df_filtered)
@@ -10803,6 +11075,34 @@ def show_churn_dashboard():
         "action": "Set up automated alerts for churn risk indicators, conduct regular analysis, and maintain agent satisfaction surveys."
     })
     
+    # Enhance with AI-powered recommendations
+    ai_context = {
+        "total_agents": total_agents,
+        "total_decline_cr": total_decline_cr,
+        "winback_count": winback_count,
+        "winback_rate": winback_rate,
+        "p0_count": p0_count,
+        "p1_count": p1_count,
+        "p2_count": p2_count,
+        "subsidy_churn": subsidy_churn,
+        "tech_churn": tech_churn,
+        "distributor_churn": distributor_churn,
+        "avg_decline_per_agent": total_decline_cr / total_agents if total_agents > 0 else 0
+    }
+    
+    ai_recommendations = generate_ai_recommendations(
+        context_data=ai_context,
+        recommendation_type="churn",
+        max_recommendations=3
+    )
+    
+    # Add AI recommendations to the list
+    if ai_recommendations:
+        for ai_rec in ai_recommendations:
+            # Ensure AI recommendations have required structure
+            if isinstance(ai_rec, dict) and all(k in ai_rec for k in ['priority', 'title', 'description', 'action']):
+                recommendations.append(ai_rec)
+    
     # Display recommendations
     if recommendations:
         # Group by priority
@@ -10855,7 +11155,7 @@ def show_churn_dashboard():
         
         # Display low priority recommendations
         if low_recs:
-            st.markdown("### 💡 Proactive Recommendations")
+            st.markdown("### 🤖 AI-Powered Proactive Recommendations")
             for i, rec in enumerate(low_recs, 1):
                 st.markdown(f"""
                 <div style="background: linear-gradient(135deg, #2ed573, #7bed9f); padding: 1rem; border-radius: 8px; margin: 0.5rem 0; color: white;">
@@ -11048,6 +11348,7 @@ def show_priority_distributor_churn_dashboard():
     # Back button
     if st.button("← Back to Main Dashboard", key="back_to_main_priority_churn"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
 
 def show_distributor_churn_dashboard():
@@ -11227,6 +11528,7 @@ def show_distributor_churn_dashboard():
     # Back button
     if st.button("← Back to Main Dashboard", key="back_to_main_distributor_churn"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
 
 def show_stable_users_dashboard():
@@ -11235,6 +11537,7 @@ def show_stable_users_dashboard():
     
     if st.button("← Back to Main Dashboard", key="back_to_main_stable"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
         if 'churn_type' in filtered_df.columns:
             absolute_churn = len(filtered_df[filtered_df['churn_type'] == 'ABSOLUTE_CHURN'])
@@ -11675,6 +11978,7 @@ def show_stable_users_dashboard():
     
     if st.button("← Back to Main Dashboard", key="back_to_main_stable"):
         st.session_state.current_view = "main"
+        st.session_state.navigation_only = True
         st.rerun()
     
 # Stable User Base Analysis - Long-term trends for SP (≥₹2.5L/month) and Tail (<₹2.5L/month) agents
@@ -12720,12 +13024,190 @@ def show_sample_bot_analytics():
     
     st.dataframe(pd.DataFrame(metrics_data), use_container_width=True)
 
+@st.cache_data(ttl=3600, show_spinner=False)  # Shared cache across ALL users! 1 hour TTL
+def get_shared_health_metrics(selected_date_str, current_hour, data_mode="Real Data"):
+    """
+    Fetch and calculate all health metrics with SHARED caching across all users.
+    This function is cached and shared across ALL users in production.
+    
+    Args:
+        selected_date_str: Date as string (for cache key)
+        current_hour: Current hour (0-23) for hourly invalidation
+        data_mode: "Real Data" or "Enhanced Dummy"
+    
+    Returns:
+        tuple: (health_metrics dict, data_mode string)
+    """
+    
+    # Convert date string back to date object
+    from datetime import datetime as dt
+    selected_date = dt.strptime(selected_date_str, '%Y-%m-%d').date()
+    
+    client = get_bigquery_client() if data_mode == "Real Data" else None
+    
+    # Load data based on mode
+    if data_mode == "Real Data" and client is not None:
+        # Fetch from BigQuery
+        batch_results = batch_fetch_bigquery_data(
+            ["transaction_success", "bio_authentication"], 
+            selected_date, 
+            client
+        )
+        transaction_df = batch_results.get("transaction_success")
+        bio_auth_df = batch_results.get("bio_authentication")
+        
+        if transaction_df is None or bio_auth_df is None:
+            transaction_df, bio_auth_df = generate_enhanced_dummy_data()
+            data_mode = "Enhanced Dummy"
+    else:
+        transaction_df, bio_auth_df = generate_enhanced_dummy_data()
+        data_mode = "Enhanced Dummy"
+    
+    # Calculate enhanced health metrics
+    try:
+        health_metrics = calculate_comprehensive_health_metrics_simple(transaction_df, bio_auth_df, client)
+    except Exception as e:
+        health_metrics = calculate_enhanced_health_metrics(transaction_df, bio_auth_df)
+    
+    # Force fresh RFM Score
+    try:
+        rfm_data = get_rfm_fraud_data()
+        if rfm_data is not None and not rfm_data.empty and 'total_caught_per' in rfm_data.columns:
+            latest_rfm = rfm_data.iloc[-1]
+            current_catch_rate = latest_rfm['total_caught_per']
+            
+            if len(rfm_data) > 1:
+                prev_catch_rate = rfm_data.iloc[-2]['total_caught_per']
+                trend_change = current_catch_rate - prev_catch_rate
+            else:
+                trend_change = 0
+            
+            if current_catch_rate >= 75:
+                rfm_status = 'green'
+                trend = 'up' if trend_change >= 0 else 'down'
+            elif current_catch_rate >= 60:
+                rfm_status = 'yellow'
+                trend = 'up' if trend_change >= 0 else 'down'
+            else:
+                rfm_status = 'red'
+                trend = 'down'
+            
+            health_metrics['RFM Score'] = {
+                'value': round(current_catch_rate, 1),
+                'status': rfm_status,
+                'trend': trend,
+                'change': round(trend_change, 1),
+                'unit': '%'
+            }
+    except Exception:
+        if 'RFM Score' not in health_metrics:
+            health_metrics['RFM Score'] = {'value': 92.6, 'status': 'green', 'trend': 'up', 'change': 1.2, 'unit': '%'}
+    
+    # Force fresh Churn Rate
+    try:
+        churn_data = get_distributor_churn_data()
+        if churn_data is not None and not churn_data.empty:
+            high_churn_count = len(churn_data[churn_data['SUM_ALL'] >= 3])
+            total_distributors = len(churn_data)
+            churn_rate = round((high_churn_count / total_distributors) * 100, 1) if total_distributors > 0 else 0
+            
+            if churn_rate < 5:
+                churn_status = 'green'
+            elif churn_rate < 10:
+                churn_status = 'yellow'
+            else:
+                churn_status = 'red'
+            
+            health_metrics['Churn Rate'] = {
+                'value': churn_rate,
+                'status': churn_status,
+                'trend': 'stable',
+                'change': 0,
+                'unit': '%'
+            }
+        else:
+            if 'Churn Rate' not in health_metrics:
+                health_metrics['Churn Rate'] = {'value': 3.2, 'status': 'yellow', 'trend': 'up', 'change': 0.8, 'unit': '%'}
+    except Exception:
+        if 'Churn Rate' not in health_metrics:
+            health_metrics['Churn Rate'] = {'value': 3.2, 'status': 'yellow', 'trend': 'up', 'change': 0.8, 'unit': '%'}
+    
+    return health_metrics, data_mode
+
 def main():
+    # Initialize cache data for persistent refresh tracking across browser refreshes
+    init_cache_data()
+    
+    # Initialize Redis shared cache (if available)
+    if REDIS_AVAILABLE and 'redis_initialized' not in st.session_state:
+        try:
+            redis_host = os.getenv('REDIS_HOST', 'localhost')
+            redis_port = int(os.getenv('REDIS_PORT', 6379))
+            init_shared_cache(use_redis=True, redis_host=redis_host, redis_port=redis_port)
+            st.session_state.redis_initialized = True
+        except Exception as e:
+            # st.sidebar.warning(f"⚠️ Redis initialization failed: {e}")
+            pass
+    
+    # Auto-refresh mechanism - Check if we've entered a new hour
+    current_hour = datetime.now().hour
+    current_minute = datetime.now().minute
+    
+    if 'last_checked_hour' not in st.session_state:
+        st.session_state.last_checked_hour = current_hour
+    
+    # If we've entered a new hour, trigger a refresh
+    if current_hour != st.session_state.last_checked_hour:
+        st.session_state.last_checked_hour = current_hour
+        
+        # Clear SHARED cache to force fresh data load for ALL users
+        st.cache_data.clear()
+        
+        # Clear Redis cache for new hour (if available)
+        if REDIS_AVAILABLE:
+            try:
+                cache = get_shared_cache()
+                # Only clear hourly cached data, not daily data
+                # Cache will automatically fetch fresh data on next query
+                pass
+            except:
+                pass
+        
+        # st.info(f"🕐 New hour detected ({current_hour:02d}:00) - Refreshing dashboard with latest data for ALL users...")
+        import time
+        # time.sleep(1)  # Brief pause to show the message
+        st.rerun()
+    
+    # Initialize session state for navigation EARLY to prevent re-rendering
+    if 'current_view' not in st.session_state:
+        st.session_state.current_view = "main"
+    
+    # Reset to main view after 30 minutes of inactivity (fresh session)
+    if 'last_interaction_time' not in st.session_state:
+        st.session_state.last_interaction_time = datetime.now()
+        st.session_state.current_view = "main"  # Fresh session, start at home
+    else:
+        time_since_last_interaction = datetime.now() - st.session_state.last_interaction_time
+        if time_since_last_interaction.total_seconds() > 1800:  # 30 minutes
+            st.session_state.current_view = "main"  # Reset to home after inactivity
+        st.session_state.last_interaction_time = datetime.now()
+    
+    # Initialize navigation flag to prevent unnecessary data loading
+    if 'navigation_only' not in st.session_state:
+        st.session_state.navigation_only = False
+    
     # Header
     st.markdown('<h1 class="main-header">🏥 AEPS Health Monitor Dashboard</h1>', unsafe_allow_html=True)
     
     # Sidebar controls
     st.sidebar.title("🎛️ Dashboard Controls")
+    
+    # Home button - Always visible to return to main dashboard
+    if st.sidebar.button("🏠 Home Dashboard", use_container_width=True, help="Return to main AEPS Health Monitor dashboard"):
+        st.session_state.current_view = "main"
+        st.rerun()
+    
+    st.sidebar.markdown("---")
     
     # Date selection
     selected_date = st.sidebar.date_input(
@@ -12735,36 +13217,147 @@ def main():
         help="Select date for health analysis"
     )
     
-    # User-driven refresh button
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
-        if st.button("🔄 Refresh Data", key="refresh_data", use_container_width=True):
-            # Clear all caches to force data refresh
-            st.cache_data.clear()
-            st.cache_resource.clear()
-            # Reset all tile refresh times
-            for tile_name in GLOBAL_CACHED_DATA['tile_refresh_times']:
-                GLOBAL_CACHED_DATA['tile_refresh_times'][tile_name] = None
-            st.success("✅ Data refreshed successfully!")
-            st.rerun()
-    
-    with col2:
-        if st.button("🗑️ Clear All Cache", key="clear_cache", use_container_width=True):
-            # Clear all caches and session state
-            st.cache_data.clear()
-            st.cache_resource.clear()
-            for key in list(st.session_state.keys()):
+    # Manual refresh button for testing
+    if st.sidebar.button("🔄 Force Refresh All Tiles", help="Manually refresh all tiles and clear all caches"):
+        # Clear all cached data - EXPLICIT clearing for reliability
+        keys_to_clear = []
+        for key in list(st.session_state.keys()):
+            if key.startswith(('get_', 'load_', 'calculate_')) or 'cache' in key.lower():
+                keys_to_clear.append(key)
+        
+        # Explicitly clear the most important cache keys
+        critical_keys = ['cached_health_metrics', 'cached_data_mode']
+        for key in critical_keys:
+            if key in st.session_state:
+                keys_to_clear.append(key)
+        
+        # Remove duplicates and delete all
+        for key in set(keys_to_clear):
+            if key in st.session_state:
                 del st.session_state[key]
-            st.rerun()
+        
+        # Clear tile refresh times to force fresh data fetch
+        st.session_state.tile_refresh_times = {}
+        st.session_state.refresh_count = 0
+        st.session_state.navigation_only = False
+        st.session_state.last_checked_hour = None  # Reset hour tracking
+        
+        # Clear Redis cache if available
+        if REDIS_AVAILABLE:
+            try:
+                cache = get_shared_cache()
+                cache.clear_all()
+                # st.sidebar.success("✅ Cleared Redis cache!")
+                pass
+            except Exception as e:
+                # st.sidebar.warning(f"⚠️ Redis cache clear failed: {str(e)}")
+                pass
+        
+        # Clear Streamlit's built-in SHARED cache (most important for production!)
+        st.cache_data.clear()
+        # st.sidebar.success("✅ Cleared shared cache (affects all users)!")
+        
+        # Show confirmation
+        # st.sidebar.success(f"✅ Cleared {len(set(keys_to_clear))} session keys + all caches!")
+        # st.sidebar.info("🔄 Reloading dashboard with FRESH data for ALL users...")
+        st.rerun()
+    
+    # Automatic refresh info
+    # st.sidebar.info("🔄 Auto-refresh active: Daily tiles at 8:59AM, Core AEPS at 9:59AM-5:59PM")
+    
+    # Add auto-refresh mechanism - page reloads every 60 seconds to check for new hour
+    # st.sidebar.markdown("---")
+    # st.sidebar.markdown("### ⏰ Auto-Refresh Status")
+    # st.sidebar.success(f"✅ Page auto-refreshes every 60 seconds to check for new hours")
+    
+    # Add JavaScript to auto-reload page every 60 seconds
+    auto_refresh_html = """
+    <script>
+        // Auto-refresh page every 60 seconds
+        setTimeout(function(){
+            window.location.reload();
+        }, 60000); // 60000 milliseconds = 60 seconds
+    </script>
+    """
+    st.components.v1.html(auto_refresh_html, height=0)
+    
+    st.sidebar.markdown("---")
+    
+    # Redis Cache Statistics
+    if REDIS_AVAILABLE:
+        st.sidebar.markdown("### 💾 Cache Status")
+        try:
+            cache = get_shared_cache()
+            stats = cache.get_stats()
+            
+            if stats['cache_type'] == 'redis':
+                # st.sidebar.success("✅ Redis Connected (Shared Cache)")
+                if 'hit_rate' in stats:
+                    # st.sidebar.metric("Cache Hit Rate", stats['hit_rate'])
+                    pass
+                # st.sidebar.caption(f"🌐 Shared across all users")
+            else:
+                # st.sidebar.warning("⚠️ Using Fallback Cache (Per-Session)")
+                # st.sidebar.caption("💡 Install Redis for production")
+                pass
+        except Exception as e:
+            # st.sidebar.error(f"❌ Cache error: {str(e)[:50]}")
+            pass
+    else:
+        # st.sidebar.info("💡 Redis not installed - using standard caching")
+        # st.sidebar.caption("Run: pip install redis")
+        pass
+    
+    st.sidebar.markdown("---")
+    
+    # Show cache statistics
+    # if st.session_state.get('refresh_count', 0) > 0:
+    #     st.sidebar.success(f"💰 Queries saved: {st.session_state.refresh_count} refreshes tracked")
+    # else:
+    #     st.sidebar.info("🆕 First load - initializing cache")
     
     # Tile Refresh Status Display
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔄 Tile Refresh Status")
     
+    # Show next fixed refresh time
+    current_time = datetime.now()
+    if is_fixed_refresh_time():
+        if current_time.hour == 8:
+            # st.sidebar.success("🕐 **NOW**: Daily tiles refresh time (8:59 AM) - All daily tiles will refresh!")
+            pass
+        else:
+            # st.sidebar.success("🕐 **NOW**: Core AEPS refresh time - Core AEPS tiles will refresh!")
+            pass
+    else:
+        # Calculate next refresh time
+        if current_time.hour < 8 or (current_time.hour == 8 and current_time.minute < 59):
+            # Next refresh is 8:59 AM today
+            next_refresh = current_time.replace(hour=8, minute=59, second=0, microsecond=0)
+            time_until = next_refresh - current_time
+            # st.sidebar.info(f"⏰ Next refresh: {next_refresh.strftime('%I:%M %p')} ({time_until.seconds//60} min) - Daily tiles")
+        elif current_time.hour == 8 and current_time.minute >= 59:
+            # Next refresh is 9:59 AM today
+            next_refresh = current_time.replace(hour=9, minute=59, second=0, microsecond=0)
+            time_until = next_refresh - current_time
+            # st.sidebar.info(f"⏰ Next refresh: {next_refresh.strftime('%I:%M %p')} ({time_until.seconds//60} min) - Core AEPS")
+        elif 9 <= current_time.hour < 18:
+            # Next refresh is next hour at 59 minutes
+            next_hour = current_time.replace(minute=59, second=0, microsecond=0)
+            if current_time.minute >= 59:
+                next_hour = next_hour.replace(hour=next_hour.hour + 1)
+            time_until = next_hour - current_time
+            # st.sidebar.info(f"⏰ Next refresh: {next_hour.strftime('%I:%M %p')} ({time_until.seconds//60} min) - Core AEPS")
+        else:
+            # After 6 PM, next refresh is tomorrow at 8:59 AM
+            next_refresh = current_time.replace(hour=8, minute=59, second=0, microsecond=0, day=current_time.day + 1)
+            time_until = next_refresh - current_time
+            # st.sidebar.info(f"⏰ Next refresh: {next_refresh.strftime('%I:%M %p')} tomorrow ({time_until.seconds//3600} hours) - Daily tiles")
+    
     refresh_status = get_tile_refresh_status()
     
-    # Core AEPS tiles (Hourly)
-    st.sidebar.markdown("**🕐 Core AEPS (Hourly)**")
+    # Core AEPS tiles (Fixed Hourly)
+    st.sidebar.markdown("**🕐 Core AEPS (Fixed Times)**")
     core_tiles = ['2fa_success', 'transaction_success', 'gtv_performance', 'bank_error', 'platform_uptime']
     for tile in core_tiles:
         status = refresh_status.get(tile, "Unknown")
@@ -12772,7 +13365,7 @@ def main():
         st.sidebar.markdown(f"{color} {tile.replace('_', ' ').title()}: {status}")
     
     # Daily tiles
-    st.sidebar.markdown("**📅 Daily Tiles**")
+    st.sidebar.markdown("**📅 Daily Tiles (8:59 AM)**")
     daily_tiles = [tile for tile in refresh_status.keys() if tile not in core_tiles]
     for tile in daily_tiles[:5]:  # Show first 5 to avoid clutter
         status = refresh_status.get(tile, "Unknown")
@@ -12786,163 +13379,20 @@ def main():
     data_mode = st.sidebar.selectbox("Data Source", ["Real Data", "Enhanced Dummy"], key="data_mode")
     
     # Initialize BigQuery client
-    # User-driven refresh mechanism
-    col1, col2, col3 = st.columns([2, 1, 2])
-    with col2:
-        if st.button("🔄 Refresh Data", key="refresh_main_data"):
-            # Clear all cached data
-            st.cache_data.clear()
-            st.session_state.pop('cached_health_metrics', None)
-            st.session_state.pop('cached_data_mode', None)
-            st.rerun()
+    # Automatic refresh only - no manual intervention
+    # Data refreshes automatically based on tiered strategy
     
-    # Check if we have cached metrics (static data until refresh)
-    if 'cached_health_metrics' in st.session_state:
-        health_metrics = st.session_state['cached_health_metrics']
-        data_mode = st.session_state.get('cached_data_mode', "Cached Data")
-        st.success(f"📊 **Using Cached Data** - Click 'Refresh Data' to reload")
-        
-        
-        # Always recalculate RFM Score to ensure it's current
-        try:
-            # Force fresh RFM calculation even with cached data
-            rfm_data = get_rfm_fraud_data()
-            if rfm_data is not None and not rfm_data.empty and 'total_caught_per' in rfm_data.columns:
-                latest_rfm = rfm_data.iloc[-1]
-                current_catch_rate = latest_rfm['total_caught_per']
-                
-                # Calculate trend from previous month
-                if len(rfm_data) > 1:
-                    prev_catch_rate = rfm_data.iloc[-2]['total_caught_per']
-                    trend_change = current_catch_rate - prev_catch_rate
-                else:
-                    trend_change = 0
-                
-                # Determine status based on catch rate
-                if current_catch_rate >= 75:
-                    rfm_status = 'green'
-                    trend = 'up' if trend_change >= 0 else 'down'
-                elif current_catch_rate >= 60:
-                    rfm_status = 'yellow'
-                    trend = 'up' if trend_change >= 0 else 'down'
-                else:
-                    rfm_status = 'red'
-                    trend = 'down'
-                
-                # Update RFM Score in cached data with fresh calculation
-                health_metrics['RFM Score'] = {
-                    'value': round(current_catch_rate, 1),
-                    'status': rfm_status,
-                    'trend': trend,
-                    'change': round(trend_change, 1),
-                    'unit': '%'
-                }
-        except Exception as e:
-            pass
-    else:
-        client = get_bigquery_client() if data_mode == "Real Data" else None
-        
-        # Load data based on mode (only when not cached)
-        if data_mode == "Real Data" and client is not None:
-            with st.spinner("🔄 Fetching real-time data from BigQuery..."):
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    transaction_df = get_real_bigquery_data("transaction_success", selected_date, client)
-                    if transaction_df is not None:
-                        st.success(f"✅ Transaction data: {len(transaction_df)} rows")
-                    else:
-                        st.error("❌ Transaction data failed")
-                
-                with col2:
-                    bio_auth_df = get_real_bigquery_data("bio_authentication", selected_date, client)
-                    if bio_auth_df is not None:
-                        st.success(f"✅ Bio auth data: {len(bio_auth_df)} rows")
-                    else:
-                        st.error("❌ Bio auth data failed")
-            
-            if transaction_df is None or bio_auth_df is None:
-                st.warning("⚠️ Failed to fetch real data. Switching to enhanced dummy data.")
-                transaction_df, bio_auth_df = generate_enhanced_dummy_data()
-                data_mode = "Enhanced Dummy"
-            else:
-                st.info(f"📊 Using real BigQuery data: {len(transaction_df)} transaction records, {len(bio_auth_df)} bio auth records")
-        else:
-            transaction_df, bio_auth_df = generate_enhanced_dummy_data()
-            data_mode = "Enhanced Dummy"
-        
-        # Calculate enhanced health metrics with comprehensive approach
-        try:
-            # Using comprehensive metrics calculation...
-            health_metrics = calculate_comprehensive_health_metrics_simple(transaction_df, bio_auth_df, client)
-        except Exception as e:
-            st.error(f"❌ Error in comprehensive metrics: {str(e)}")
-            import traceback
-            st.error(f"Full error: {traceback.format_exc()}")
-            # Falling back to original enhanced metrics...
-            health_metrics = calculate_enhanced_health_metrics(transaction_df, bio_auth_df)
-        
-        # Always ensure RFM Score is fresh and correct
-        try:
-            # Force fresh RFM calculation
-            rfm_data = get_rfm_fraud_data()
-            if rfm_data is not None and not rfm_data.empty and 'total_caught_per' in rfm_data.columns:
-                latest_rfm = rfm_data.iloc[-1]
-                current_catch_rate = latest_rfm['total_caught_per']
-                
-                # Calculate trend from previous month
-                if len(rfm_data) > 1:
-                    prev_catch_rate = rfm_data.iloc[-2]['total_caught_per']
-                    trend_change = current_catch_rate - prev_catch_rate
-                else:
-                    trend_change = 0
-                
-                # Determine status based on catch rate
-                if current_catch_rate >= 75:
-                    rfm_status = 'green'
-                    trend = 'up' if trend_change >= 0 else 'down'
-                elif current_catch_rate >= 60:
-                    rfm_status = 'yellow'
-                    trend = 'up' if trend_change >= 0 else 'down'
-                else:
-                    rfm_status = 'red'
-                    trend = 'down'
-                
-                # Update RFM Score with fresh calculation
-                health_metrics['RFM Score'] = {
-                    'value': round(current_catch_rate, 1),
-                    'status': rfm_status,
-                    'trend': trend,
-                    'change': round(trend_change, 1),
-                    'unit': '%'
-                }
-            else:
-                # Fallback if no fresh data available
-                if 'RFM Score' not in health_metrics:
-                    fallback_value = 92.6
-                    if fallback_value >= 75:
-                        fallback_status = 'green'
-                    elif fallback_value >= 60:
-                        fallback_status = 'yellow'
-                    else:
-                        fallback_status = 'red'
-                    health_metrics['RFM Score'] = {'value': fallback_value, 'status': fallback_status, 'trend': 'up', 'change': 1.2, 'unit': '%'}
-        except Exception as e:
-            # Keep existing RFM Score if any
-            if 'RFM Score' not in health_metrics:
-                fallback_value = 92.6
-                if fallback_value >= 75:
-                    fallback_status = 'green'
-                elif fallback_value >= 60:
-                    fallback_status = 'yellow'
-                else:
-                    fallback_status = 'red'
-                health_metrics['RFM Score'] = {'value': fallback_value, 'status': fallback_status, 'trend': 'up', 'change': 1.2, 'unit': '%'}
-        
-        
-        # Cache the results for static behavior
-        st.session_state['cached_health_metrics'] = health_metrics
-        st.session_state['cached_data_mode'] = data_mode
+    # Use SHARED cache across all users (Production-ready!)
+    current_hour = datetime.now().hour
+    selected_date_str = selected_date.strftime('%Y-%m-%d')
+    
+    # Show loading indicator
+    with st.spinner("🔄 Loading dashboard data..."):
+        # Call the SHARED cached function - First user fetches, others get instant cache!
+        health_metrics, data_mode = get_shared_health_metrics(selected_date_str, current_hour, data_mode)
+    
+    # Show cache status - shared across all users
+    # st.sidebar.success(f"💾 Shared Cache Active - Data shared across all users!")
     
     # Initialize session state for navigation
     if 'current_view' not in st.session_state:
@@ -13169,36 +13619,42 @@ def main():
             change = metric_data.get('change', 0)
             key_suffix = actual_name.replace(' ','_').replace('/','_')
 
-            # Enhanced label with better formatting
-            label = f"{status_emoji}\n**{display_name}**\n`{value}{unit}`\n{trend_emoji} {change:+.1f}"
-            
-            # Add custom styling based on status
-            button_style = ""
+            # Get colors based on status
             if status == 'green':
-                button_style = "background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%) !important; border-color: #28a745 !important;"
+                bg_color = "#d4edda"
+                border_color = "#28a745"
             elif status == 'yellow':
-                button_style = "background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%) !important; border-color: #ffc107 !important;"
-            elif status == 'red':
-                button_style = "background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%) !important; border-color: #dc3545 !important;"
+                bg_color = "#fff3cd"
+                border_color = "#ffc107"
+            else:  # red
+                bg_color = "#f8d7da"
+                border_color = "#dc3545"
             
-            # Apply enhanced traffic light styling
+            # Apply custom CSS for this specific button
             st.markdown(f"""
             <style>
-            .stButton > button[key="tile_btn_{key_suffix}"] {{
-                {button_style}
+            div[data-testid="stButton"] button[kind="secondary"]:has-text("{key_suffix}") {{
+                background: {bg_color} !important;
+                border: 3px solid {border_color} !important;
+                border-radius: 12px !important;
+                height: 150px !important;
+                width: 100% !important;
                 box-shadow: 0 4px 8px rgba(0,0,0,0.15) !important;
-                border-width: 3px !important;
-                font-weight: 700 !important;
             }}
-            .stButton > button[key="tile_btn_{key_suffix}"]:hover {{
-                transform: translateY(-3px) !important;
-                box-shadow: 0 8px 16px rgba(0,0,0,0.2) !important;
-                border-width: 4px !important;
+            div[data-testid="stButton"]:has(button[key*="{key_suffix}"]) button {{
+                background: {bg_color} !important;
+                border: 3px solid {border_color} !important;
+                border-radius: 12px !important;
+                height: 150px !important;
+                width: 100% !important;
+                box-shadow: 0 4px 8px rgba(0,0,0,0.15) !important;
             }}
             </style>
             """, unsafe_allow_html=True)
             
-            clicked = st.button(label, key=f"tile_btn_{key_suffix}")
+            # Create button with formatted label
+            label = f"{status_emoji}\n{display_name}\n{value}{unit}\n{trend_emoji} {change:+.1f}"
+            clicked = st.button(label, key=f"btn_{key_suffix}")
             if clicked:
                 # Direct navigation to relevant dashboards - no intermediate pages
                 if actual_name in ['Transaction Success Rate', '2FA Success Rate', 'GTV Performance']:
@@ -13280,6 +13736,7 @@ def main():
             # Back button
             if st.button("← Back to Main Dashboard", key="back_to_main"):
                 st.session_state.current_view = "main"
+                st.session_state.navigation_only = True
                 st.rerun()
             
             st.markdown(f"# {section_definitions[section_name]['icon']} {section_name}")
@@ -13485,6 +13942,7 @@ def main():
             st.error(f"Metric '{metric_name}' not found.")
             if st.button("← Back to Main Dashboard"):
                 st.session_state.current_view = "main"
+                st.session_state.navigation_only = True
                 st.rerun()
     
     # Footer
@@ -13737,12 +14195,8 @@ def show_anomalies_detailed_view():
     """Show detailed anomaly analysis from Google Sheets data"""
     st.markdown("## 🚨 Anomaly Detection & Analysis")
     
-    # Add refresh button
-    col1, col2 = st.columns([4, 1])
-    with col2:
-        if st.button("🔄 Refresh Data", help="Click to refresh data from Google Sheets"):
-            st.cache_data.clear()
-            st.rerun()
+    # Automatic refresh - no manual button
+    # Data refreshes automatically based on schedule
     
     # Fetch anomaly data
     try:
@@ -13949,7 +14403,7 @@ def show_anomalies_detailed_view():
                                 st.success(f"✅ Good: {deviation:+.2f}%")  # Higher than median is good
             
             # Recommendations
-            st.markdown("#### 💡 Recommendations")
+            st.markdown("#### 🤖 AI-Powered Recommendations")
             
             # Separate recommendations for normal vs inverse metrics
             normal_above = 0
@@ -13972,27 +14426,62 @@ def show_anomalies_detailed_view():
                     else:
                         normal_below += 1
             
+            # Rule-based recommendations
+            rule_recommendations = []
+            
             if normal_above > 0:
                 st.success("✅ **Normal Metrics Above Range**: Excellent performance! Higher values are better for these metrics")
             if normal_below > 0:
                 st.warning("⚠️ **Normal Metrics Below Range**: Poor performance! These metrics should be higher - investigate system issues")
+                rule_recommendations.append("Investigate why normal metrics are below expected range")
             if inverse_above > 0:
                 st.success("✅ **Inverse Metrics Above Range**: Excellent performance! Lower values are better for these metrics")
             if inverse_below > 0:
                 st.warning("⚠️ **Inverse Metrics Below Range**: Poor performance! These metrics should be lower - investigate why they're higher than expected")
+                rule_recommendations.append("Investigate why inverse metrics are worse than expected")
             
             if actual_anomalies == 0:
                 st.success("🎉 **All systems operating normally** - No immediate action required")
+            
+            # Enhance with AI recommendations if there are anomalies
+            if actual_anomalies > 0:
+                ai_context = {
+                    "total_anomalies": actual_anomalies,
+                    "normal_above": normal_above,
+                    "normal_below": normal_below,
+                    "inverse_above": inverse_above,
+                    "inverse_below": inverse_below,
+                    "anomaly_details": {metric: {
+                        "status": data.get('anomaly_status', ''),
+                        "current": data.get('current', 0),
+                        "median": data.get('median', 0),
+                        "is_inverse": data.get('is_inverse', False)
+                    } for metric, data in anomaly_data.items()}
+                }
+                
+                ai_recommendations = generate_ai_recommendations(
+                    context_data=ai_context,
+                    recommendation_type="performance",
+                    max_recommendations=3
+                )
+                
+                if ai_recommendations:
+                    st.markdown("---")
+                    st.markdown("##### 🤖 AI-Powered Insights")
+                    for rec in ai_recommendations:
+                        st.info(f"- {rec}")
         
         # Back button
         if st.button("← Back to Main Dashboard"):
             st.session_state.current_view = "main"
+            st.session_state.navigation_only = True
             st.rerun()
             
     except Exception as e:
         st.error(f"❌ Error loading anomaly data: {str(e)}")
         if st.button("← Back to Main Dashboard"):
             st.session_state.current_view = "main"
+            st.session_state.navigation_only = True
             st.rerun()
 
 if __name__ == "__main__":
