@@ -5593,6 +5593,10 @@ def create_enhanced_trend_chart(metric_data, title):
         
     hourly_data = pd.DataFrame(metric_data['hourly_data'])
     
+    # Check if hourly_data is empty or doesn't have 'hour' column
+    if hourly_data.empty or 'hour' not in hourly_data.columns:
+        return None
+    
     # Reorder hours to start from 6 AM
     def hour_sort_key(hour_str):
         """Custom sort key to start from 06:00"""
@@ -5607,7 +5611,11 @@ def create_enhanced_trend_chart(metric_data, title):
             return 999
     
     # Sort hourly data starting from 6 AM
-    hourly_data = hourly_data.sort_values('hour', key=lambda x: x.map(hour_sort_key))
+    try:
+        hourly_data = hourly_data.sort_values('hour', key=lambda x: x.map(hour_sort_key))
+    except (KeyError, ValueError):
+        # If sorting fails, continue with unsorted data
+        pass
     
     fig = go.Figure()
     
