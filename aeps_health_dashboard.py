@@ -4156,8 +4156,14 @@ def calculate_enhanced_health_metrics(transaction_df, bio_auth_df):
                 except:
                     return False
             
-            transaction_df = transaction_df[transaction_df['hour'].apply(is_completed_hour)].copy()
-            # st.success(f"🕐 Filtered to completed hours only (up to {last_completed_hour_str} - representing data from {last_completed_hour_str} to {current_hour:02d}:00)")
+            filtered_df = transaction_df[transaction_df['hour'].apply(is_completed_hour)].copy()
+            # Only use filtered data if it's not empty, otherwise use all data
+            if not filtered_df.empty:
+                transaction_df = filtered_df
+                # st.success(f"🕐 Filtered to completed hours only (up to {last_completed_hour_str})")
+            else:
+                # Keep all data if filtering removes everything (better than showing 0)
+                st.warning(f"⚠️ All hours filtered out. Using all available data.")
         
         # Debug: Show what columns we actually have
         # st.info(f"📊 Transaction DataFrame columns: {list(transaction_df.columns)}")
