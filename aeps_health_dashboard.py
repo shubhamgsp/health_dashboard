@@ -3060,7 +3060,7 @@ def get_real_bigquery_data(query_name, selected_date, _client):
             t3.DPID
           FROM aeps_req_data t1
           JOIN aeps_res_data t2 ON t1.request_id = t2.request_id
-          JOIN aeps_device_details t3 ON t1.request_id = t3.request_id
+          LEFT JOIN aeps_device_details t3 ON t1.request_id = t3.request_id
           WHERE t1.master_trans_type = 'CW'
         ),
         hourly_metrics AS (
@@ -3303,6 +3303,21 @@ def get_real_bigquery_data(query_name, selected_date, _client):
         # Execute query
         with st.spinner(f"🔄 Fetching {query_name} data..."):
             df = _client.query(query).result().to_dataframe()
+        
+        # Debug logging for production issues
+        if query_name == "transaction_success":
+            if df.empty:
+                st.warning(f"⚠️ Query returned empty dataframe for {query_name}")
+            else:
+                # Check if all values are NULL
+                null_cols = [col for col in ['overall_success_rate', 'total_amount_cr'] if col in df.columns and df[col].isna().all()]
+                if null_cols:
+                    st.warning(f"⚠️ Columns with all NULL values: {null_cols}")
+                    st.info(f"📊 Query returned {len(df)} rows but critical columns are NULL")
+                # Show sample of what we got
+                if len(df) > 0:
+                    st.info(f"📊 Sample data - Rows: {len(df)}, Cols: {list(df.columns)}")
+                    st.dataframe(df.head(3))
         
         return df
         
